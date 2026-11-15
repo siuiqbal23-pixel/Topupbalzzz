@@ -659,8 +659,25 @@ export function StorefrontView({
                 </div>
               </div>
 
-              {/* Right Column: Payment, Buyer Details & Receipt */}
-              <div className="lg:col-span-5 lg:sticky lg:top-24 space-y-5">
+              {/* Right Column: Trust, payment and order summary */}
+              <div className="lg:col-span-5 lg:sticky lg:top-24 space-y-4">
+                <div className="rounded-xl border border-white/[0.08] bg-[#12161F] p-4">
+                  <p className="text-xs font-semibold text-slate-300">Ulasan & penilaian</p>
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="text-3xl font-bold text-white">4.99</span>
+                    <div>
+                      <div className="text-amber-400 tracking-[2px] text-sm">★★★★★</div>
+                      <p className="text-[10px] text-slate-500">Penilaian pelanggan TopupBalz</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="rounded-xl border border-white/[0.08] bg-[#12161F] p-4 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-white">Butuh bantuan?</p>
+                    <p className="text-xs text-slate-400 mt-1">Hubungi pasukan sokongan kami.</p>
+                  </div>
+                  <a href={`https://wa.me/${store.settings.whatsappNumber.replace(/\\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="shrink-0 rounded-lg border border-orange-500/40 bg-orange-500/10 px-3 py-2 text-xs font-semibold text-orange-300 hover:bg-orange-500/20">Hubungi CS</a>
+                </div>
                 <div className="p-5 sm:p-6 rounded-xl bg-[#12161F] border border-white/[0.08] space-y-5">
                   <h3 className="font-display text-base font-semibold text-white">
                     3. Kaedah Bayaran &amp; Ringkasan

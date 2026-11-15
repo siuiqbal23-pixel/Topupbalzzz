@@ -3,6 +3,7 @@ import { Search, Menu, X, Sun, Moon, ChevronLeft, ChevronRight, Gamepad2, Shoppi
 import GamePage from './GamePage';
 import AccountPages from './AccountPages';
 import TransactionPages from './TransactionPages';
+import AdminPanel from './AdminPanel';
 
 const games = [
   { id:'ff', name:'Free Fire', category:'Battle Royale', description:'Diamonds & Membership', mark:'FF', tone:'from-orange-500 to-amber-700' },
@@ -17,7 +18,7 @@ const slides = [
   { eyebrow:'TOPUP MUDAH • PANTAS • SELAMAT', title:'Mula game, kami uruskan topup.', desc:'Pilih game kegemaran dan dapatkan tambah nilai dengan mudah di TopupBalz.', tag:'SELAMAT DATANG KE TOPUPBALZ' },
   { eyebrow:'PROMOSI TOPUPBALZ', title:'Game pilihan, satu tempat.', desc:'Cari produk game anda dan semak pesanan pada bila-bila masa.', tag:'TOPUP GAME KEGEMARAN ANDA' },
 ];
-export default function App() {
+export default function App() {\n  if (window.location.pathname.startsWith('/admin')) return <AdminPanel />;
   if (['/login','/register','/profile','/verify-email'].includes(window.location.pathname)) return <AccountPages path={window.location.pathname} />;
   if (['/transaction','/transaction-check','/privacy-policy','/terms','/maintenance'].includes(window.location.pathname) || window.location.pathname.startsWith('/transaction/')) return <TransactionPages path={window.location.pathname} />;
   if (window.location.pathname.startsWith('/game/')) return <GamePage gameId={window.location.pathname.split('/')[2] || 'ff'} />;

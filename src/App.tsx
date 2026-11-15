@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Search, Menu, X, Sun, Moon, ChevronLeft, ChevronRight, Gamepad2, ShoppingBag, ReceiptText, UserRound, Sparkles, ShieldCheck, Zap, Headphones } from 'lucide-react';
+import GamePage from './GamePage';
 
 const games = [
   { id:'ff', name:'Free Fire', category:'Battle Royale', description:'Diamonds & Membership', mark:'FF', tone:'from-orange-500 to-amber-700' },
@@ -15,6 +16,7 @@ const slides = [
   { eyebrow:'PROMOSI TOPUPBALZ', title:'Game pilihan, satu tempat.', desc:'Cari produk game anda dan semak pesanan pada bila-bila masa.', tag:'TOPUP GAME KEGEMARAN ANDA' },
 ];
 export default function App() {
+  if (window.location.pathname.startsWith('/game/')) return <GamePage gameId={window.location.pathname.split('/')[2] || 'ff'} />;
   const [search,setSearch]=useState('');
   const [category,setCategory]=useState('Semua');
   const [slide,setSlide]=useState(0);

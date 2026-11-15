@@ -7,147 +7,31 @@ interface NavbarProps {
   onOpenAdmin: () => void;
 }
 
-export function Navbar({
-  storeName,
-  onNavigateHomeSection,
-  onOpenAdmin,
-}: NavbarProps) {
-  const [mobileOpen, setMobileOpen] = useState(false);
-
-  const handleSectionClick = (sectionId?: string) => {
-    setMobileOpen(false);
-    onNavigateHomeSection(sectionId);
-  };
-
+export function Navbar({ storeName, onNavigateHomeSection, onOpenAdmin }: NavbarProps) {
+  const [open, setOpen] = useState(false);
+  const go = (section?: string) => { setOpen(false); onNavigateHomeSection(section); };
   return (
-    <header className="sticky top-0 z-40 border-b border-white/[0.07] bg-[#0B0D12]/90 backdrop-blur-md">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-8">
-        {/* Zone 1: Single-line Brand Wordmark */}
-        <a
-          href="/"
-          onClick={(e) => {
-            e.preventDefault();
-            handleSectionClick();
-          }}
-          className="font-display text-xl font-bold tracking-tight text-white whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 rounded-md px-1"
-        >
+    <header className="sticky top-0 z-40 border-b border-white/[0.07] bg-[#22262f]/95 backdrop-blur">
+      <div className="mx-auto flex h-14 max-w-5xl items-center justify-between gap-4 px-4 sm:px-6">
+        <button onClick={() => go()} className="flex items-center gap-2 text-left text-sm font-bold text-white">
+          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-orange-500 text-[10px] font-black text-white">TB</span>
           {storeName}
-        </a>
-
-        {/* Zone 2: 4 Clean Single-Line Nav Links */}
-        <nav
-          aria-label="Navigasi utama"
-          className="hidden md:flex items-center gap-7 text-sm font-medium text-slate-300"
-        >
-          <a
-            href="#katalog"
-            onClick={(e) => {
-              e.preventDefault();
-              handleSectionClick('katalog');
-            }}
-            className="hover:text-white hover:underline underline-offset-4 decoration-orange-500 transition-colors whitespace-nowrap shrink-0"
-          >
-            Katalog
-          </a>
-          <a
-            href="#topup-pantas"
-            onClick={(e) => {
-              e.preventDefault();
-              handleSectionClick('topup-pantas');
-            }}
-            className="hover:text-white hover:underline underline-offset-4 decoration-orange-500 transition-colors whitespace-nowrap shrink-0"
-          >
-            Topup Pantas
-          </a>
-          <a
-            href="#ranking"
-            onClick={(e) => {
-              e.preventDefault();
-              handleSectionClick('ranking');
-            }}
-            className="hover:text-white hover:underline underline-offset-4 decoration-orange-500 transition-colors whitespace-nowrap shrink-0"
-          >
-            Ranking
-          </a>
-          <a
-            href="#semak-pesanan"
-            onClick={(e) => {
-              e.preventDefault();
-              handleSectionClick('semak-pesanan');
-            }}
-            className="hover:text-white hover:underline underline-offset-4 decoration-orange-500 transition-colors whitespace-nowrap shrink-0"
-          >
-            Semak Pesanan
-          </a>
+        </button>
+        <nav className="hidden items-center gap-5 text-xs text-slate-300 sm:flex">
+          <button onClick={() => go()} className="hover:text-orange-400">Beranda</button>
+          <button onClick={() => go('semak-transaksi')} className="hover:text-orange-400">Cek Transaksi</button>
+          <button onClick={onOpenAdmin} className="hover:text-orange-400">Panel Admin</button>
         </nav>
-
-        {/* Zone 3: 1 Primary Action + Mobile Trigger */}
-        <div className="flex items-center gap-3 shrink-0">
-          <button
-            type="button"
-            onClick={onOpenAdmin}
-            className="px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-orange-600 hover:bg-orange-500 active:scale-[0.98] rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-400"
-          >
-            Panel Admin
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setMobileOpen((prev) => !prev)}
-            aria-label={mobileOpen ? 'Tutup menu' : 'Buka menu'}
-            aria-expanded={mobileOpen}
-            className="md:hidden p-2 rounded-lg text-slate-300 hover:text-white hover:bg-white/5 transition-colors cursor-pointer"
-          >
-            {mobileOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-          </button>
+        <div className="flex items-center gap-2">
+          <button onClick={onOpenAdmin} className="rounded-md border border-orange-500/50 bg-orange-500 px-3 py-2 text-[11px] font-semibold text-white hover:bg-orange-400">Panel Admin</button>
+          <button onClick={() => setOpen(v => !v)} aria-label={open ? 'Tutup menu' : 'Buka menu'} className="rounded-md p-2 text-slate-300 hover:bg-white/5 sm:hidden">{open ? <X className="h-5 w-5"/> : <Menu className="h-5 w-5"/>}</button>
         </div>
       </div>
-
-      {/* Mobile Dropdown Navigation */}
-      {mobileOpen ? (
-        <div className="md:hidden border-t border-white/[0.07] bg-[#0F131B] px-4 py-3 space-y-1">
-          <a
-            href="#katalog"
-            onClick={(e) => {
-              e.preventDefault();
-              handleSectionClick('katalog');
-            }}
-            className="block py-2.5 px-3 rounded-lg text-sm font-medium text-slate-200 hover:bg-white/5 hover:text-white"
-          >
-            Katalog Game
-          </a>
-          <a
-            href="#topup-pantas"
-            onClick={(e) => {
-              e.preventDefault();
-              handleSectionClick('topup-pantas');
-            }}
-            className="block py-2.5 px-3 rounded-lg text-sm font-medium text-slate-200 hover:bg-white/5 hover:text-white"
-          >
-            Topup Pantas
-          </a>
-          <a
-            href="#ranking"
-            onClick={(e) => {
-              e.preventDefault();
-              handleSectionClick('ranking');
-            }}
-            className="block py-2.5 px-3 rounded-lg text-sm font-medium text-slate-200 hover:bg-white/5 hover:text-white"
-          >
-            Ranking Topup
-          </a>
-          <a
-            href="#semak-pesanan"
-            onClick={(e) => {
-              e.preventDefault();
-              handleSectionClick('semak-pesanan');
-            }}
-            className="block py-2.5 px-3 rounded-lg text-sm font-medium text-slate-200 hover:bg-white/5 hover:text-white"
-          >
-            Semak Pesanan
-          </a>
-        </div>
-      ) : null}
+      {open && <div className="space-y-1 border-t border-white/10 bg-[#22262f] px-4 py-3 sm:hidden">
+        <button onClick={() => go()} className="block w-full rounded-md px-3 py-2 text-left text-sm text-slate-200">Beranda</button>
+        <button onClick={() => go('semak-transaksi')} className="block w-full rounded-md px-3 py-2 text-left text-sm text-slate-200">Cek Transaksi</button>
+        <button onClick={() => {setOpen(false);onOpenAdmin();}} className="block w-full rounded-md px-3 py-2 text-left text-sm text-orange-300">Panel Admin</button>
+      </div>}
     </header>
   );
 }

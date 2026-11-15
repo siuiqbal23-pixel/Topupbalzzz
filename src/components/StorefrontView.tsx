@@ -29,6 +29,8 @@ export function StorefrontView({ store, onCreateOrder, onOpenAdmin }: Storefront
   const [copied, setCopied] = useState(false);
   const [promoClosed, setPromoClosed] = useState(false);
   const [lookup, setLookup] = useState('');
+  const [voucherCode, setVoucherCode] = useState('');
+  const [voucherMessage, setVoucherMessage] = useState('');
   const matchingOrders = store.orders.filter((o) => !lookup || o.id.toLowerCase().includes(lookup.toLowerCase()) || o.whatsapp.includes(lookup));
   const total = selectedPackage?.priceMyr ?? 0;
   const waNumber = store.settings.whatsappNumber.replace(/\D/g, '');
@@ -66,7 +68,7 @@ export function StorefrontView({ store, onCreateOrder, onOpenAdmin }: Storefront
 
       <main className="mx-auto max-w-5xl px-4 pb-10 pt-8 sm:px-6">
         <section className="mb-6 flex flex-col gap-4 rounded-lg border border-white/[0.06] bg-gradient-to-r from-[#202c40] to-[#1d2028] p-4 sm:flex-row sm:items-center">
-          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-orange-500/15 text-2xl font-black text-orange-400">TB</div>
+          <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-[#151922]">{game?.image ? <img src={game.image} alt={game.name} className="h-full w-full object-cover" /> : <span className="text-2xl font-black text-orange-400">TB</span>}</div>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-lg font-bold">{game?.name ?? store.settings.storeName} TOPUP</h1>
@@ -143,6 +145,14 @@ export function StorefrontView({ store, onCreateOrder, onOpenAdmin }: Storefront
             <section className={card}>
               <div className="flex items-center gap-3"><span className="rounded-full bg-orange-500/10 p-2 text-orange-400"><Headphones className="h-4 w-4" /></span><div><p className="text-xs font-bold">Butuh Bantuan?</p><p className="text-[10px] text-slate-500">Kami sedia membantu anda.</p></div></div>
               <a href={`https://wa.me/${waNumber}`} target="_blank" rel="noreferrer" className="mt-3 flex w-full items-center justify-center gap-2 rounded-md border border-white/10 bg-[#1b1f27] py-2 text-xs hover:border-orange-500"><Headphones className="h-3.5 w-3.5" /> Hubungi CS</a>
+            </section>
+            <section className={card}>
+              <h2 className="mb-3 text-sm font-semibold">Kode Voucher</h2>
+              <div className="flex gap-2">
+                <input className={input} value={voucherCode} onChange={(e) => {setVoucherCode(e.target.value);setVoucherMessage('');}} placeholder="Masukkan kode offer" />
+                <button type="button" onClick={() => setVoucherMessage(voucherCode.trim() ? 'Kod voucher belum tersedia untuk kedai ini.' : 'Masukkan kod voucher terlebih dahulu.')} className="shrink-0 rounded-md border border-white/10 bg-[#1b1f27] px-3 text-xs text-slate-300 hover:border-orange-500">Gunakan</button>
+              </div>
+              {voucherMessage && <p className="mt-2 text-[10px] text-amber-300">{voucherMessage}</p>}
             </section>
             <section className={card}>
               <h2 className="mb-3 text-sm font-semibold">Ringkasan Pesanan</h2>

@@ -676,7 +676,7 @@ export function StorefrontView({
                     <p className="text-sm font-semibold text-white">Butuh bantuan?</p>
                     <p className="text-xs text-slate-400 mt-1">Hubungi pasukan sokongan kami.</p>
                   </div>
-                  <a href={`https://wa.me/${store.settings.whatsappNumber.replace(/\\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="shrink-0 rounded-lg border border-orange-500/40 bg-orange-500/10 px-3 py-2 text-xs font-semibold text-orange-300 hover:bg-orange-500/20">Hubungi CS</a>
+                  <a href={`https://wa.me/${store.settings.whatsappNumber.replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="shrink-0 rounded-lg border border-orange-500/40 bg-orange-500/10 px-3 py-2 text-xs font-semibold text-orange-300 hover:bg-orange-500/20">Hubungi CS</a>
                 </div>
                 <div className="p-5 sm:p-6 rounded-xl bg-[#12161F] border border-white/[0.08] space-y-5">
                   <h3 className="font-display text-base font-semibold text-white">

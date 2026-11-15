@@ -1,0 +1,21 @@
+/* TopupBalz storefront refresh — Laravel-free React/Vite UI */
+:root {
+  --tbz-bg: #090b10;
+  --tbz-panel: #121722;
+  --tbz-panel-2: #171e2b;
+  --tbz-orange: #ff7900;
+  --tbz-orange-soft: rgba(255, 121, 0, .14);
+}
+html { background: var(--tbz-bg); }
+body {
+  background:
+    radial-gradient(ellipse at 50% -18%, rgba(255,121,0,.13), transparent 42%),
+    var(--tbz-bg);
+}
+button, a, input { -webkit-tap-highlight-color: transparent; }
+button { transition: background-color .18s ease, border-color .18s ease, transform .18s ease, box-shadow .18s ease; }
+input:focus-visible { outline: 2px solid var(--tbz-orange); outline-offset: 2px; }
+::selection { background: rgba(255,121,0,.35); color: white; }
+@media (max-width: 640px) {
+  body { font-size: 14px; }
+}

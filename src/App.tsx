@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Search, Menu, X, Sun, Moon, ChevronLeft, ChevronRight, Gamepad2, ShoppingBag, ReceiptText, UserRound, Sparkles, ShieldCheck, Zap, Headphones } from 'lucide-react';
 import GamePage from './GamePage';
 import AccountPages from './AccountPages';
+import TransactionPages from './TransactionPages';
 
 const games = [
   { id:'ff', name:'Free Fire', category:'Battle Royale', description:'Diamonds & Membership', mark:'FF', tone:'from-orange-500 to-amber-700' },
@@ -18,6 +19,7 @@ const slides = [
 ];
 export default function App() {
   if (['/login','/register','/profile','/verify-email'].includes(window.location.pathname)) return <AccountPages path={window.location.pathname} />;
+  if (['/transaction','/transaction-check','/privacy-policy','/terms','/maintenance'].includes(window.location.pathname) || window.location.pathname.startsWith('/transaction/')) return <TransactionPages path={window.location.pathname} />;
   if (window.location.pathname.startsWith('/game/')) return <GamePage gameId={window.location.pathname.split('/')[2] || 'ff'} />;
   const [search,setSearch]=useState('');
   const [category,setCategory]=useState('Semua');

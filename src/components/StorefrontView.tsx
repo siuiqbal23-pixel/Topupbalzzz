@@ -161,7 +161,7 @@ export function StorefrontView({ store, onCreateOrder, onOpenAdmin }: Storefront
           </aside>
         </form>
 
-        <section className="mt-8 border-t border-white/[0.07] pt-5">
+        <section id="semak-transaksi" className="mt-8 border-t border-white/[0.07] pt-5">
           <h2 className="mb-3 text-sm font-semibold">Semak Transaksi</h2>
           <input className={input} value={lookup} onChange={(e) => setLookup(e.target.value)} placeholder="Masukkan ID pesanan atau nombor WhatsApp" />
           {lookup && <div className="mt-2 space-y-2">{matchingOrders.map((o) => <div key={o.id} className="flex flex-wrap justify-between gap-2 rounded-md bg-[#22262f] p-3 text-xs"><span>{o.id} · {o.gameName}</span><span className="text-orange-300">{o.status}</span></div>)}{matchingOrders.length===0 && <p className="text-xs text-slate-500">Tiada transaksi ditemui.</p>}</div>}

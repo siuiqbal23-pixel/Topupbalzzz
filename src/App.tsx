@@ -1,817 +1,718 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { AdminDashboard } from './components/AdminDashboard';
-import { AuthView } from './components/AuthView';
-import { BottomNavBar } from './components/BottomNavBar';
-import { BrandDetailView } from './components/BrandDetailView';
-import { HomeView } from './components/HomeView';
-import { InfoView } from './components/InfoView';
-import { MainFooter } from './components/MainFooter';
-import { MainHeader } from './components/MainHeader';
-import { ProfileView } from './components/ProfileView';
+import dotenv from 'dotenv';
+import express from 'express';
+import { adminAuth } from './src/lib/firebase-admin.js';
+import { requireAuth, type AuthRequest } from './src/middleware/auth.js';
 import {
-  MaintenanceView,
-  StaticContentPage,
-} from './components/StaticPagesView';
-import { TransactionCheckView } from './components/TransactionCheckView';
-import { TransactionShowView } from './components/TransactionShowView';
+  getOrCreateUser,
+  getUserByUid,
+  updateUserProfile,
+} from './src/db/users.js';
 import {
-  INITIAL_STORE_STATE,
-  formatLocalMyPhone,
-  isPlaceholderPhoneValue,
-  resolvePaymentAccountDisplay,
-} from './data/initialStoreData';
-import {
-  createOrderApi,
-  deleteAdminOrderApi,
-  fetchAdminOrdersApi,
-  fetchBootstrap,
-  fetchMyOrders,
-  fetchMyProfile,
-  fetchOrderByReference,
-  fetchPublicTransactions,
-  saveAdminInfoPostsApi,
-  saveAdminStoreConfigApi,
-  updateAdminOrderApi,
-  updateMyProfile,
-  uploadOrderProofApi,
-} from './lib/api';
-import { auth } from './lib/firebase';
+  checkVerifiedOtpToken,
+  createAndSendEmailOtp,
+  createRealOrder,
+  deleteOrderByReference,
+  getAllOrdersForAdmin,
+  getOrderRowByReference,
+  getPublicTransactions,
+  getStoreConfigJson,
+  getTelegramConfig,
+  getUserOrders,
+  listInfoPosts,
+  replaceInfoPosts,
+  saveStoreConfigJson,
+  saveTelegramConfig,
+  sendTelegramMessage,
+  sendTelegramOrderNotification,
+  updateOrderByReference,
+  verifyEmailOtp,
+} from './src/db/repository.js';
 import type {
-  AppearanceMode,
-  BrandItem,
-  CategoryItem,
-  FaqItem,
-  HomeSection,
   InfoPost,
-  ManualPaymentAccount,
-  OrderItem,
-  PublicOrderSummary,
-  SliderItem,
-  StoreSettings,
-  TopupBalzStoreState,
-  UserProfile,
-  VoucherItem,
-  WhatsAppTemplates,
-} from './types/store';
+  PaymentStatusCode,
+  TopupStatusCode,
+} from './src/types/store.js';
 
-function getStoredAppearance(): AppearanceMode {
-  try {
-    const val = localStorage.getItem('appearance');
-    if (val === 'light' || val === 'dark' || val === 'system') return val;
-  } catch {
-    // ignore
+dotenv.config();
+
+const OWNER_ADMIN_EMAIL = 'siuiqbal23@gmail.com';
+
+async function isAdminUser(req: AuthRequest): Promise<boolean> {
+  const uid = req.user?.uid;
+  const email = (req.user?.email || '').toLowerCase();
+  if (!uid) return false;
+  if (email === OWNER_ADMIN_EMAIL) return true;
+  const userRow = await getUserByUid(uid);
+  return userRow?.role === 'admin';
+}
+
+function isTransientDbSocketError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current && typeof current === 'object'; depth++) {
+    const rec = current as { code?: string; message?: string; cause?: unknown };
+    if (rec.code === 'ENOENT' || rec.code === 'ECONNREFUSED') return true;
+    if (
+      typeof rec.message === 'string' &&
+      (rec.message.includes('ENOENT') || rec.message.includes('.s.PGSQL.'))
+    ) {
+      return true;
+    }
+    current = rec.cause;
   }
-  return 'dark';
+  return false;
 }
 
-function applyTheme(mode: AppearanceMode) {
-  if (typeof window === 'undefined') return;
-  const isDark =
-    mode === 'dark' ||
-    (mode === 'system' &&
-      window.matchMedia('(prefers-color-scheme: dark)').matches);
-  document.documentElement.classList.toggle('dark', isDark);
-}
-
-export default function App() {
-  const [store, setStore] = useState<TopupBalzStoreState>(INITIAL_STORE_STATE);
-  const [publicTransactions, setPublicTransactions] = useState<
-    PublicOrderSummary[]
-  >([]);
-  const [myOrders, setMyOrders] = useState<OrderItem[]>([]);
-  const [adminOrders, setAdminOrders] = useState<OrderItem[]>([]);
-  const [lookedUpOrder, setLookedUpOrder] = useState<OrderItem | null>(null);
-  const [appearance, setAppearance] = useState<AppearanceMode>(() =>
-    getStoredAppearance()
-  );
-  const [currentPath, setCurrentPath] = useState<string>(() =>
-    typeof window !== 'undefined' ? window.location.pathname || '/' : '/'
-  );
-  const [pendingReturnPath, setPendingReturnPath] = useState<string | null>(
-    null
-  );
-
-  const refreshPublicTransactions = useCallback(() => {
-    fetchPublicTransactions()
-      .then((res) => setPublicTransactions(res.transactions))
-      .catch(() => {});
-  }, []);
-
-  const refreshOrdersForUser = useCallback((role: UserProfile['role']) => {
-    if (!auth.currentUser) {
-      setMyOrders([]);
-      setAdminOrders([]);
-      return;
-    }
-    fetchMyOrders()
-      .then((res) => setMyOrders(res.orders))
-      .catch(() => {});
-    if (role === 'admin') {
-      fetchAdminOrdersApi()
-        .then((res) => setAdminOrders(res.orders))
-        .catch(() => {});
-    } else {
-      setAdminOrders([]);
-    }
-  }, []);
-
-  // Load initial storefront configuration & real anonymized transactions from PostgreSQL
-  useEffect(() => {
-    let cancelled = false;
-    Promise.all([
-      fetchBootstrap().catch(() => null),
-      fetchPublicTransactions().catch(() => ({ transactions: [] })),
-    ]).then(([boot, pub]) => {
-      if (cancelled) return;
-      if (pub?.transactions) {
-        setPublicTransactions(pub.transactions);
-      }
-      if (boot) {
-        setStore((prev) => {
-          const nextSettings = boot.config?.settings
-            ? (() => {
-                const merged = { ...prev.settings, ...boot.config.settings };
-                const waDigits = (merged.whatsappCs || '').replace(/\D/g, '');
-                if (
-                  (!merged.phone?.trim() ||
-                    merged.phone === '+60 11-2345 6789') &&
-                  waDigits &&
-                  waDigits !== '601123456789'
-                ) {
-                  merged.phone = `+${waDigits}`;
-                }
-                return merged;
-              })()
-            : prev.settings;
-
-          const rawPaymentAccounts =
-            Array.isArray(boot.config?.paymentAccounts) &&
-            boot.config.paymentAccounts.length > 0
-              ? boot.config.paymentAccounts
-              : prev.paymentAccounts;
-
-          return {
-            ...prev,
-            categories: Array.isArray(boot.config?.categories)
-              ? boot.config.categories
-              : prev.categories,
-            homeSections: Array.isArray(boot.config?.homeSections)
-              ? boot.config.homeSections
-              : prev.homeSections,
-            brands:
-              Array.isArray(boot.config?.brands) &&
-              boot.config.brands.length > 0
-                ? boot.config.brands
-                : prev.brands,
-            sliders:
-              Array.isArray(boot.config?.sliders) &&
-              boot.config.sliders.length > 0
-                ? boot.config.sliders
-                : prev.sliders,
-            vouchers: Array.isArray(boot.config?.vouchers)
-              ? boot.config.vouchers
-              : prev.vouchers,
-            faqs: Array.isArray(boot.config?.faqs)
-              ? boot.config.faqs
-              : prev.faqs,
-            paymentAccounts: rawPaymentAccounts.map((acc) =>
-              resolvePaymentAccountDisplay(acc, nextSettings)
-            ),
-            whatsappTemplates: boot.config?.whatsappTemplates
-              ? { ...prev.whatsappTemplates, ...boot.config.whatsappTemplates }
-              : prev.whatsappTemplates,
-            settings: nextSettings,
-            infoPosts:
-              boot.infoPosts.length > 0 || boot.config !== null
-                ? boot.infoPosts
-                : prev.infoPosts,
-          };
-        });
-      }
+function sendRouteError(
+  res: express.Response,
+  error: unknown,
+  fallbackMessage: string
+) {
+  if (isTransientDbSocketError(error)) {
+    res.status(503).json({
+      error: 'Sambungan pangkalan data sedang dimulakan. Sila cuba sebentar lagi.',
     });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    return;
+  }
+  const msg = error instanceof Error ? error.message : fallbackMessage;
+  res.status(500).json({ error: msg });
+}
 
-  // Subscribe to Firebase Auth state changes & hydrate profile/orders from PostgreSQL
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) {
-        setStore((prev) => ({
-          ...prev,
-          user: INITIAL_STORE_STATE.user,
+export function buildApp() {
+  const app = express();
+  app.use(express.json({ limit: '5mb' }));
+
+  // Health Check
+  app.get('/api/health', (_req, res) => {
+    res.json({ ok: true });
+  });
+
+  // Public Bootstrap (Catalog overrides + Active InfoPosts — NEVER exposes orders/PII, bot tokens, or adminPin)
+  app.get('/api/bootstrap', async (_req, res) => {
+    try {
+      const [configData, posts, tgCfg] = await Promise.all([
+        getStoreConfigJson(),
+        listInfoPosts(false),
+        getTelegramConfig(),
+      ]);
+
+      let sanitizedConfig: Record<string, unknown> | null = configData
+        ? { ...configData }
+        : null;
+      if (sanitizedConfig) {
+        const rawSettings =
+          sanitizedConfig.settings &&
+          typeof sanitizedConfig.settings === 'object'
+            ? { ...(sanitizedConfig.settings as Record<string, unknown>) }
+            : {};
+        delete rawSettings.adminPin;
+        const waDigits = String(rawSettings.whatsappCs || '').replace(/\D/g, '');
+        const phoneStr = String(rawSettings.phone || '').trim();
+        if (
+          (!phoneStr || phoneStr === '+60 11-2345 6789') &&
+          waDigits &&
+          waDigits !== '601123456789'
+        ) {
+          rawSettings.phone = `+${waDigits}`;
+        }
+        if (tgCfg.channelUrl) {
+          rawSettings.telegramChannelUrl = tgCfg.channelUrl;
+        }
+        if (tgCfg.channelName) {
+          rawSettings.telegramChannelName = tgCfg.channelName;
+        }
+        sanitizedConfig.settings = rawSettings;
+
+        if (Array.isArray(sanitizedConfig.paymentAccounts)) {
+          const adminDigits =
+            waDigits && waDigits !== '601123456789'
+              ? waDigits
+              : String(rawSettings.phone || '').replace(/\D/g, '');
+          const localDigits =
+            adminDigits.startsWith('60') && adminDigits.length >= 10
+              ? `0${adminDigits.slice(2)}`
+              : !adminDigits.startsWith('0') && adminDigits.startsWith('1')
+                ? `0${adminDigits}`
+                : adminDigits;
+          const formattedLocal =
+            localDigits.length === 10
+              ? `${localDigits.slice(0, 3)}-${localDigits.slice(3, 6)}-${localDigits.slice(6)}`
+              : localDigits.length === 11
+                ? `${localDigits.slice(0, 3)}-${localDigits.slice(3, 7)}-${localDigits.slice(7)}`
+                : localDigits;
+          const hasRealAdminPhone =
+            Boolean(formattedLocal) &&
+            localDigits !== '01123456789' &&
+            localDigits !== '601123456789';
+
+          sanitizedConfig.paymentAccounts = sanitizedConfig.paymentAccounts.map(
+            (item) => {
+              if (!item || typeof item !== 'object') return item;
+              const acc = { ...(item as Record<string, unknown>) };
+              const ch = String(acc.channelCode || '').toUpperCase();
+              const isTng = acc.id === 'pay-tng' || ch === 'TNG';
+              const accDigits = String(acc.accountNumber || '').replace(
+                /\D/g,
+                ''
+              );
+              if (
+                hasRealAdminPhone &&
+                (accDigits === '' ||
+                  accDigits === '01123456789' ||
+                  accDigits === '601123456789')
+              ) {
+                acc.accountNumber = formattedLocal;
+              }
+              if (isTng && acc.qrImageUrl === undefined) {
+                acc.qrImageUrl = '/assets/aistudio/20260920_125927_866903c8.jpg';
+              }
+              if (isTng && acc.requireProof === undefined) {
+                acc.requireProof = true;
+              }
+              if (isTng && acc.notifyChannel === undefined) {
+                acc.notifyChannel = 'telegram';
+              }
+              return acc;
+            }
+          );
+        }
+      } else if (tgCfg.channelUrl || tgCfg.channelName) {
+        sanitizedConfig = {
+          settings: {
+            telegramChannelUrl: tgCfg.channelUrl,
+            telegramChannelName: tgCfg.channelName,
+          },
+        };
+      }
+
+      res.json({
+        config: sanitizedConfig,
+        infoPosts: posts,
+      });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal memuatkan data kedai.');
+    }
+  });
+
+  // Public Bar 2 Transactions Feed (Strictly anonymized, NO reference/invoice code, NO PII)
+  app.get('/api/transactions/public', async (_req, res) => {
+    try {
+      const items = await getPublicTransactions();
+      res.json({ transactions: items });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal memuatkan transaksi terkini.');
+    }
+  });
+
+  // Sign Up Email OTP Verification Endpoints
+  app.post('/api/auth/send-otp', async (req, res) => {
+    try {
+      const email = String(req.body?.email || '').trim().toLowerCase();
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        res.status(400).json({ error: 'Format e-mel tidak sah.' });
+        return;
+      }
+      const result = await createAndSendEmailOtp(email);
+      res.json({
+        ok: true,
+        delivery: result.delivery,
+        ...(result.previewOtp ? { previewOtp: result.previewOtp } : {}),
+      });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal menghantar kod OTP.');
+    }
+  });
+
+  app.post('/api/auth/verify-otp', async (req, res) => {
+    try {
+      const email = String(req.body?.email || '').trim().toLowerCase();
+      const code = String(req.body?.code || '').trim();
+      if (!email || !/^\d{6}$/.test(code)) {
+        res.status(400).json({ error: 'Sila masukkan kod OTP 6 digit.' });
+        return;
+      }
+      const result = await verifyEmailOtp(email, code);
+      if (!result.verified) {
+        res
+          .status(400)
+          .json({ error: 'Kod OTP tidak sah atau telah tamat tempoh.' });
+        return;
+      }
+      res.json(result);
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal mengesahkan OTP.');
+    }
+  });
+
+  // Sync Firebase Auth user with PostgreSQL users table
+  app.post('/api/auth/sync', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const uid = req.user!.uid;
+      const email = req.user!.email || String(req.body?.email || '');
+      const name = String(req.body?.name || req.user!.name || '');
+      const phone = String(req.body?.phone || '');
+      const otpVerificationToken = String(
+        req.body?.otpVerificationToken || ''
+      );
+
+      let isVerified = Boolean(req.user!.email_verified);
+      if (!isVerified && otpVerificationToken && email) {
+        const otpValid = await checkVerifiedOtpToken(
+          email,
+          otpVerificationToken
+        );
+        if (otpValid) {
+          isVerified = true;
+          try {
+            await adminAuth.updateUser(uid, { emailVerified: true });
+          } catch (fbErr) {
+            console.warn('Could not update Firebase emailVerified flag:', fbErr);
+          }
+        }
+      }
+
+      const dbUser = await getOrCreateUser({
+        uid,
+        email,
+        name,
+        phone,
+        emailVerified: isVerified,
+      });
+
+      res.json({
+        user: {
+          uid: dbUser.uid,
+          name: dbUser.name,
+          email: dbUser.email,
+          phone: dbUser.phone,
+          loggedIn: true,
+          emailVerified: dbUser.emailVerified,
+          role: dbUser.role === 'admin' ? 'admin' : 'customer',
+        },
+      });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal menyelaraskan akaun pengguna.');
+    }
+  });
+
+  // Current User Profile
+  app.get('/api/me', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const uid = req.user!.uid;
+      const existing = await getUserByUid(uid);
+      const dbUser =
+        existing ??
+        (await getOrCreateUser({
+          uid,
+          email: req.user!.email || '',
+          name: req.user!.name,
+          emailVerified: Boolean(req.user!.email_verified),
         }));
-        setMyOrders([]);
-        setAdminOrders([]);
-        setLookedUpOrder(null);
+
+      res.json({
+        user: {
+          uid: dbUser.uid,
+          name: dbUser.name,
+          email: dbUser.email,
+          phone: dbUser.phone,
+          loggedIn: true,
+          emailVerified: dbUser.emailVerified,
+          role: dbUser.role === 'admin' ? 'admin' : 'customer',
+        },
+      });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal memuatkan profil.');
+    }
+  });
+
+  app.patch('/api/me', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const uid = req.user!.uid;
+      const name =
+        typeof req.body?.name === 'string' ? req.body.name : undefined;
+      const phone =
+        typeof req.body?.phone === 'string' ? req.body.phone : undefined;
+      const updated = await updateUserProfile(uid, { name, phone });
+      if (!updated) {
+        res.status(404).json({ error: 'Profil tidak ditemui.' });
+        return;
+      }
+      res.json({
+        user: {
+          uid: updated.uid,
+          name: updated.name,
+          email: updated.email,
+          phone: updated.phone,
+          loggedIn: true,
+          emailVerified: updated.emailVerified,
+          role: updated.role === 'admin' ? 'admin' : 'customer',
+        },
+      });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal mengemas kini profil.');
+    }
+  });
+
+  // Logged-in User's Own Orders (includes Purchase Code IDs)
+  app.get('/api/orders/mine', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const myOrders = await getUserOrders(req.user!.uid);
+      res.json({ orders: myOrders });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal memuatkan sejarah transaksi.');
+    }
+  });
+
+  // Single Order Invoice (Owner or Admin only)
+  app.get(
+    '/api/orders/:reference',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        const reference = String(req.params.reference || '');
+        const row = await getOrderRowByReference(reference);
+        if (!row) {
+          res.status(404).json({ error: 'Invois tidak ditemui.' });
+          return;
+        }
+        const admin = await isAdminUser(req);
+        if (row.userUid !== req.user!.uid && !admin) {
+          res
+            .status(403)
+            .json({ error: 'Anda tidak mempunyai akses kepada invois ini.' });
+          return;
+        }
+        res.json({
+          order: {
+            id: `ord-${row.id}`,
+            reference: row.reference,
+            createdAt: row.createdAt.toISOString(),
+            brandId: row.brandId,
+            brandSlug: row.brandSlug,
+            brandName: row.brandName,
+            brandImage: row.brandImage,
+            productId: row.productId,
+            productName: row.productName,
+            accountId: row.accountId,
+            serverId: row.serverId ?? undefined,
+            customerName: row.customerName,
+            whatsapp: row.whatsapp,
+            email: row.email ?? undefined,
+            paymentAccountId: row.paymentAccountId,
+            paymentMethodName: row.paymentMethodName,
+            paymentChannelCode: row.paymentChannelCode,
+            paymentAccountNumber: row.paymentAccountNumber,
+            paymentAccountLabel: row.paymentAccountLabel,
+            subtotal: row.subtotal,
+            discountAmount: row.discountAmount,
+            voucherCode: row.voucherCode ?? undefined,
+            totalAmount: row.totalAmount,
+            paymentStatus: row.paymentStatus as PaymentStatusCode,
+            topupStatus: row.topupStatus as TopupStatusCode,
+            paymentProofUrl: row.paymentProofUrl ?? undefined,
+            deliveryProofUrl: row.deliveryProofUrl ?? undefined,
+            notes: row.notes ?? undefined,
+          },
+        });
+      } catch (error: unknown) {
+        const msg =
+          error instanceof Error ? error.message : 'Gagal memuatkan invois.';
+        res.status(500).json({ error: msg });
+      }
+    }
+  );
+
+  // Create Real Order (Mandatory Auth)
+  app.post('/api/orders', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const uid = req.user!.uid;
+      // Ensure user row exists in PostgreSQL
+      await getOrCreateUser({
+        uid,
+        email: req.user!.email || String(req.body?.email || ''),
+        name: String(req.body?.customerName || req.user!.name || ''),
+        phone: String(req.body?.whatsapp || ''),
+        emailVerified: Boolean(req.user!.email_verified),
+      });
+
+      const body = req.body || {};
+      if (
+        !body.brandId ||
+        !body.brandName ||
+        !body.productId ||
+        !body.productName ||
+        !body.accountId ||
+        !body.customerName ||
+        !body.whatsapp ||
+        !body.paymentAccountId
+      ) {
+        res.status(400).json({ error: 'Butiran pesanan tidak lengkap.' });
         return;
       }
 
+      const created = await createRealOrder(uid, {
+        brandId: String(body.brandId),
+        brandSlug: String(body.brandSlug || ''),
+        brandName: String(body.brandName),
+        brandImage: String(body.brandImage || ''),
+        productId: String(body.productId),
+        productName: String(body.productName),
+        accountId: String(body.accountId),
+        serverId: body.serverId ? String(body.serverId) : undefined,
+        customerName: String(body.customerName),
+        whatsapp: String(body.whatsapp),
+        email: body.email ? String(body.email) : undefined,
+        paymentAccountId: String(body.paymentAccountId),
+        paymentMethodName: String(body.paymentMethodName || ''),
+        paymentChannelCode: String(body.paymentChannelCode || ''),
+        paymentAccountNumber: String(body.paymentAccountNumber || ''),
+        paymentAccountLabel: String(body.paymentAccountLabel || ''),
+        subtotal: Number(body.subtotal || 0),
+        discountAmount: Number(body.discountAmount || 0),
+        voucherCode: body.voucherCode ? String(body.voucherCode) : undefined,
+        totalAmount: Number(body.totalAmount || 0),
+        paymentProofUrl: body.paymentProofUrl
+          ? String(body.paymentProofUrl)
+          : undefined,
+        notes: body.notes ? String(body.notes) : undefined,
+      });
+
+      sendTelegramOrderNotification(created, 'new').catch((tgErr) => {
+        console.warn('Telegram order notification skipped:', tgErr);
+      });
+
+      res.status(201).json({ order: created });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal mencipta pesanan.');
+    }
+  });
+
+  // Upload Payment Proof (Owner or Admin)
+  app.patch(
+    '/api/orders/:reference/proof',
+    requireAuth,
+    async (req: AuthRequest, res) => {
       try {
-        const { user: profile } = await fetchMyProfile();
-        setStore((prev) => ({
-          ...prev,
-          user: profile,
-        }));
-        refreshOrdersForUser(profile.role);
-      } catch {
-        const email = fbUser.email || '';
-        const fallbackRole: UserProfile['role'] =
-          email.trim().toLowerCase() === 'siuiqbal23@gmail.com'
-            ? 'admin'
-            : 'customer';
-        setStore((prev) => ({
-          ...prev,
-          user: {
-            uid: fbUser.uid,
-            name:
-              fbUser.displayName ||
-              email.split('@')[0] ||
-              'Pelanggan',
-            email,
-            phone: '',
-            loggedIn: true,
-            emailVerified: fbUser.emailVerified,
-            role: fallbackRole,
-          },
-        }));
+        const reference = String(req.params.reference || '');
+        const paymentProofUrl = String(req.body?.paymentProofUrl || '');
+        if (!paymentProofUrl) {
+          res.status(400).json({ error: 'Gambar bukti bayaran diperlukan.' });
+          return;
+        }
+        const existing = await getOrderRowByReference(reference);
+        if (!existing) {
+          res.status(404).json({ error: 'Invois tidak ditemui.' });
+          return;
+        }
+        const admin = await isAdminUser(req);
+        if (existing.userUid !== req.user!.uid && !admin) {
+          res.status(403).json({ error: 'Akses ditolak.' });
+          return;
+        }
+        const updated = await updateOrderByReference(reference, {
+          paymentProofUrl,
+        });
+        if (updated) {
+          sendTelegramOrderNotification(updated, 'update').catch((tgErr) => {
+            console.warn('Telegram proof update notification skipped:', tgErr);
+          });
+        }
+        res.json({ order: updated });
+      } catch (error: unknown) {
+        const msg =
+          error instanceof Error
+            ? error.message
+            : 'Gagal memuat naik bukti bayaran.';
+        res.status(500).json({ error: msg });
       }
-    });
+    }
+  );
 
-    return () => unsubscribe();
-  }, [refreshOrdersForUser]);
-
-  useEffect(() => {
-    applyTheme(appearance);
+  // Admin: List All Real Orders
+  app.get('/api/admin/orders', requireAuth, async (req: AuthRequest, res) => {
     try {
-      localStorage.setItem('appearance', appearance);
-    } catch {
-      // ignore
+      if (!(await isAdminUser(req))) {
+        res.status(403).json({ error: 'Akses admin diperlukan.' });
+        return;
+      }
+      const allOrders = await getAllOrdersForAdmin();
+      res.json({ orders: allOrders });
+    } catch (error: unknown) {
+      const msg =
+        error instanceof Error
+          ? error.message
+          : 'Gagal memuatkan senarai pesanan.';
+      res.status(500).json({ error: msg });
     }
-    if (appearance !== 'system') return;
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const listener = () => applyTheme('system');
-    mq.addEventListener('change', listener);
-    return () => mq.removeEventListener('change', listener);
-  }, [appearance]);
+  });
 
-  useEffect(() => {
-    const handlePopState = () => {
-      setCurrentPath(window.location.pathname || '/');
-    };
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
-
-  const navigate = (path: string) => {
-    const target = path || '/';
-    if (window.location.pathname !== target) {
-      window.history.pushState({}, '', target);
+  // Admin: Update Order Status / Notes
+  app.patch(
+    '/api/admin/orders/:reference',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!(await isAdminUser(req))) {
+          res.status(403).json({ error: 'Akses admin diperlukan.' });
+          return;
+        }
+        const reference = String(req.params.reference || '');
+        const patch: {
+          paymentStatus?: PaymentStatusCode;
+          topupStatus?: TopupStatusCode;
+          notes?: string;
+        } = {};
+        if (req.body?.paymentStatus !== undefined) {
+          patch.paymentStatus = Number(
+            req.body.paymentStatus
+          ) as PaymentStatusCode;
+        }
+        if (req.body?.topupStatus !== undefined) {
+          patch.topupStatus = Number(req.body.topupStatus) as TopupStatusCode;
+        }
+        if (req.body?.notes !== undefined) {
+          patch.notes = String(req.body.notes);
+        }
+        const updated = await updateOrderByReference(reference, patch);
+        if (!updated) {
+          res.status(404).json({ error: 'Pesanan tidak ditemui.' });
+          return;
+        }
+        if (
+          patch.paymentStatus !== undefined ||
+          patch.topupStatus !== undefined
+        ) {
+          sendTelegramOrderNotification(updated, 'update').catch((tgErr) => {
+            console.warn('Telegram update notification skipped:', tgErr);
+          });
+        }
+        res.json({ order: updated });
+      } catch (error: unknown) {
+        sendRouteError(res, error, 'Gagal mengemas kini pesanan.');
+      }
     }
-    setCurrentPath(target);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  // Route matching
-  const isAdmin =
-    currentPath === '/admin' || currentPath.startsWith('/admin/');
-  const brandSlugMatch = currentPath.startsWith('/brand/')
-    ? decodeURIComponent(currentPath.slice('/brand/'.length).split('/')[0])
-    : null;
-  const txRefMatch = currentPath.startsWith('/transaction/')
-    ? decodeURIComponent(
-        currentPath.slice('/transaction/'.length).split('/')[0]
-      )
-    : null;
-
-  const matchedBrand = useMemo(
-    () =>
-      brandSlugMatch
-        ? store.brands.find((b) => b.slug === brandSlugMatch && b.active)
-        : undefined,
-    [brandSlugMatch, store.brands]
   );
 
-  const matchedOrder = useMemo(() => {
-    if (!txRefMatch) return undefined;
-    const target = txRefMatch.toLowerCase();
-    return (
-      myOrders.find((o) => o.reference.toLowerCase() === target) ??
-      adminOrders.find((o) => o.reference.toLowerCase() === target) ??
-      (lookedUpOrder && lookedUpOrder.reference.toLowerCase() === target
-        ? lookedUpOrder
-        : undefined)
-    );
-  }, [txRefMatch, myOrders, adminOrders, lookedUpOrder]);
-
-  useEffect(() => {
-    if (!txRefMatch || !store.user.loggedIn || matchedOrder) return;
-    let cancelled = false;
-    fetchOrderByReference(txRefMatch)
-      .then((res) => {
-        if (!cancelled) setLookedUpOrder(res.order);
-      })
-      .catch(() => {
-        if (!cancelled) setLookedUpOrder(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [txRefMatch, store.user.loggedIn, matchedOrder]);
-
-  const persistStoreConfig = (next: TopupBalzStoreState) => {
-    if (!auth.currentUser || next.user.role !== 'admin') return;
-    const {
-      categories,
-      homeSections,
-      brands,
-      sliders,
-      vouchers,
-      faqs,
-      paymentAccounts,
-      whatsappTemplates,
-      settings,
-    } = next;
-    saveAdminStoreConfigApi({
-      categories,
-      homeSections,
-      brands,
-      sliders,
-      vouchers,
-      faqs,
-      paymentAccounts,
-      whatsappTemplates,
-      settings,
-    }).catch((err) => {
-      console.error('Failed to persist store configuration:', err);
-    });
-  };
-
-  // Real Order Checkout (PostgreSQL + Mandatory Firebase Auth)
-  const handleCreateOrder = async (
-    payload: Omit<
-      OrderItem,
-      'id' | 'reference' | 'createdAt' | 'paymentStatus' | 'topupStatus'
-    >
-  ): Promise<OrderItem | null> => {
-    if (!store.user.loggedIn || !auth.currentUser) {
-      setPendingReturnPath(`/brand/${payload.brandSlug}`);
-      navigate('/login');
-      return null;
+  // Admin: Delete Order
+  app.delete(
+    '/api/admin/orders/:reference',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!(await isAdminUser(req))) {
+          res.status(403).json({ error: 'Akses admin diperlukan.' });
+          return;
+        }
+        const reference = String(req.params.reference || '');
+        const ok = await deleteOrderByReference(reference);
+        res.json({ ok });
+      } catch (error: unknown) {
+        const msg =
+          error instanceof Error ? error.message : 'Gagal memadam pesanan.';
+        res.status(500).json({ error: msg });
+      }
     }
+  );
 
-    const { order } = await createOrderApi(payload);
-    setMyOrders((prev) => [order, ...prev]);
-    if (store.user.role === 'admin') {
-      setAdminOrders((prev) => [order, ...prev]);
-    }
-    refreshPublicTransactions();
-    return order;
-  };
-
-  const handleUploadProof = (orderReference: string, dataUrl: string) => {
-    uploadOrderProofApi(orderReference, dataUrl)
-      .then(({ order }) => {
-        setMyOrders((prev) =>
-          prev.map((o) => (o.reference === orderReference ? order : o))
-        );
-        setAdminOrders((prev) =>
-          prev.map((o) => (o.reference === orderReference ? order : o))
-        );
-        setLookedUpOrder((prev) =>
-          prev?.reference === orderReference ? order : prev
-        );
-      })
-      .catch((err) => {
-        console.error('Failed to save payment proof:', err);
-      });
-  };
-
-  const handleUpdateOrder = (reference: string, patch: Partial<OrderItem>) => {
-    setAdminOrders((prev) =>
-      prev.map((o) => (o.reference === reference ? { ...o, ...patch } : o))
-    );
-    setMyOrders((prev) =>
-      prev.map((o) => (o.reference === reference ? { ...o, ...patch } : o))
-    );
-    updateAdminOrderApi(reference, {
-      paymentStatus: patch.paymentStatus,
-      topupStatus: patch.topupStatus,
-      notes: patch.notes,
-    })
-      .then(({ order }) => {
-        setAdminOrders((prev) =>
-          prev.map((o) => (o.reference === reference ? order : o))
-        );
-        setMyOrders((prev) =>
-          prev.map((o) => (o.reference === reference ? order : o))
-        );
-        refreshPublicTransactions();
-      })
-      .catch((err) => {
-        console.error('Failed to update order:', err);
-      });
-  };
-
-  const handleDeleteOrder = (reference: string) => {
-    setAdminOrders((prev) => prev.filter((o) => o.reference !== reference));
-    setMyOrders((prev) => prev.filter((o) => o.reference !== reference));
-    deleteAdminOrderApi(reference)
-      .then(() => {
-        refreshPublicTransactions();
-      })
-      .catch((err) => {
-        console.error('Failed to delete order:', err);
-      });
-  };
-
-  const handleSaveBrand = (brand: BrandItem) => {
-    setStore((prev) => {
-      const exists = prev.brands.some((b) => b.id === brand.id);
-      const next: TopupBalzStoreState = {
-        ...prev,
-        brands: exists
-          ? prev.brands.map((b) => (b.id === brand.id ? brand : b))
-          : [...prev.brands, brand],
-      };
-      persistStoreConfig(next);
-      return next;
-    });
-  };
-
-  const handleDeleteBrand = (brandId: string) => {
-    setStore((prev) => {
-      const next: TopupBalzStoreState = {
-        ...prev,
-        brands: prev.brands.filter((b) => b.id !== brandId),
-        homeSections: prev.homeSections.map((sec) => ({
-          ...sec,
-          brandIds: sec.brandIds.filter((id) => id !== brandId),
-        })),
-      };
-      persistStoreConfig(next);
-      return next;
-    });
-  };
-
-  const handleUpdateCategories = (categories: CategoryItem[]) =>
-    setStore((prev) => {
-      const next = { ...prev, categories };
-      persistStoreConfig(next);
-      return next;
-    });
-
-  const handleUpdateHomeSections = (homeSections: HomeSection[]) =>
-    setStore((prev) => {
-      const next = { ...prev, homeSections };
-      persistStoreConfig(next);
-      return next;
-    });
-
-  const handleUpdateSliders = (sliders: SliderItem[]) =>
-    setStore((prev) => {
-      const next = { ...prev, sliders };
-      persistStoreConfig(next);
-      return next;
-    });
-
-  const handleUpdateVouchers = (vouchers: VoucherItem[]) =>
-    setStore((prev) => {
-      const next = { ...prev, vouchers };
-      persistStoreConfig(next);
-      return next;
-    });
-
-  const handleUpdateFaqs = (faqs: FaqItem[]) =>
-    setStore((prev) => {
-      const next = { ...prev, faqs };
-      persistStoreConfig(next);
-      return next;
-    });
-
-  const handleUpdateInfoPosts = (infoPosts: InfoPost[]) => {
-    setStore((prev) => ({ ...prev, infoPosts }));
-    if (auth.currentUser && store.user.role === 'admin') {
-      saveAdminInfoPostsApi(infoPosts).catch((err) => {
-        console.error('Failed to persist info posts:', err);
-      });
-    }
-  };
-
-  const handleUpdatePaymentAccounts = (paymentAccounts: ManualPaymentAccount[]) =>
-    setStore((prev) => {
-      const next = { ...prev, paymentAccounts };
-      persistStoreConfig(next);
-      return next;
-    });
-
-  const handleUpdateWhatsappTemplates = (
-    whatsappTemplates: WhatsAppTemplates
-  ) =>
-    setStore((prev) => {
-      const next = { ...prev, whatsappTemplates };
-      persistStoreConfig(next);
-      return next;
-    });
-
-  const handleUpdateSettings = (settings: StoreSettings) =>
-    setStore((prev) => {
-      const prevAdminDigits = (
-        prev.settings.whatsappCs ||
-        prev.settings.phone ||
-        ''
-      ).replace(/\D/g, '');
-      const prevLocalDigits =
-        prevAdminDigits.startsWith('60') && prevAdminDigits.length >= 10
-          ? `0${prevAdminDigits.slice(2)}`
-          : prevAdminDigits;
-      const newSource = !isPlaceholderPhoneValue(settings.whatsappCs)
-        ? settings.whatsappCs
-        : !isPlaceholderPhoneValue(settings.phone)
-          ? settings.phone
-          : '';
-      const newFormatted = newSource ? formatLocalMyPhone(newSource) : '';
-
-      const syncedPaymentAccounts = newFormatted
-        ? prev.paymentAccounts.map((acc) => {
-            const isPhoneChannel =
-              acc.type === 'whatsapp' ||
-              acc.id === 'pay-whatsapp' ||
-              acc.id === 'pay-tng' ||
-              acc.channelCode.toUpperCase() === 'TNG';
-            if (!isPhoneChannel) return acc;
-            const accDigits = (acc.accountNumber || '').replace(/\D/g, '');
-            const matchesOld =
-              isPlaceholderPhoneValue(acc.accountNumber) ||
-              (prevLocalDigits && accDigits === prevLocalDigits) ||
-              (prevAdminDigits && accDigits === prevAdminDigits);
-            if (!matchesOld) return acc;
-            return { ...acc, accountNumber: newFormatted };
-          })
-        : prev.paymentAccounts;
-
-      const next = {
-        ...prev,
-        settings,
-        paymentAccounts: syncedPaymentAccounts,
-      };
-      persistStoreConfig(next);
-      return next;
-    });
-
-  const handleUpdateUser = async (patch: { name: string; phone: string }) => {
-    const { user } = await updateMyProfile(patch);
-    setStore((prev) => ({ ...prev, user }));
-  };
-
-  const handleLogout = async () => {
+  // Admin: Save Info Posts
+  app.put('/api/admin/info', requireAuth, async (req: AuthRequest, res) => {
     try {
-      await signOut(auth);
-    } catch {
-      // ignore signOut errors
+      if (!(await isAdminUser(req))) {
+        res.status(403).json({ error: 'Akses admin diperlukan.' });
+        return;
+      }
+      const posts = Array.isArray(req.body?.infoPosts)
+        ? (req.body.infoPosts as InfoPost[])
+        : [];
+      const saved = await replaceInfoPosts(posts);
+      res.json({ infoPosts: saved });
+    } catch (error: unknown) {
+      const msg =
+        error instanceof Error ? error.message : 'Gagal menyimpan informasi.';
+      res.status(500).json({ error: msg });
     }
-    setStore((prev) => ({
-      ...prev,
-      user: INITIAL_STORE_STATE.user,
-    }));
-    setMyOrders([]);
-    setAdminOrders([]);
-    setLookedUpOrder(null);
-    navigate('/');
-  };
+  });
 
-  const handleRequireLogin = (returnTo: string) => {
-    setPendingReturnPath(returnTo);
-    navigate('/login');
-  };
+  // Admin: Save Store Config (Categories, Brands, Sliders, Vouchers, FAQs, Payments, Templates, Settings)
+  app.put('/api/admin/store', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!(await isAdminUser(req))) {
+        res.status(403).json({ error: 'Akses admin diperlukan.' });
+        return;
+      }
+      const config = req.body?.config;
+      if (!config || typeof config !== 'object') {
+        res.status(400).json({ error: 'Data konfigurasi tidak sah.' });
+        return;
+      }
+      await saveStoreConfigJson(config as Record<string, unknown>);
+      res.json({ ok: true });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal menyimpan konfigurasi kedai.');
+    }
+  });
 
-  const adminStoreView: TopupBalzStoreState = useMemo(
-    () => ({
-      ...store,
-      orders: adminOrders,
-    }),
-    [store, adminOrders]
+  // Admin: Get Telegram Info Channel Config
+  app.get('/api/admin/telegram', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!(await isAdminUser(req))) {
+        res.status(403).json({ error: 'Akses admin diperlukan.' });
+        return;
+      }
+      const telegram = await getTelegramConfig();
+      res.json({ telegram });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal memuatkan tetapan Telegram.');
+    }
+  });
+
+  // Admin: Save Telegram Info Channel Config
+  app.put('/api/admin/telegram', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!(await isAdminUser(req))) {
+        res.status(403).json({ error: 'Akses admin diperlukan.' });
+        return;
+      }
+      const saved = await saveTelegramConfig({
+        enabled: Boolean(req.body?.enabled),
+        botToken: String(req.body?.botToken || ''),
+        channelId: String(req.body?.channelId || ''),
+        channelUrl: String(req.body?.channelUrl || ''),
+        channelName: String(req.body?.channelName || 'Telegram Info Channel'),
+      });
+      res.json({ telegram: saved });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal menyimpan tetapan Telegram.');
+    }
+  });
+
+  // Admin: Test Telegram Info Channel Notification
+  app.post(
+    '/api/admin/telegram/test',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!(await isAdminUser(req))) {
+          res.status(403).json({ error: 'Akses admin diperlukan.' });
+          return;
+        }
+        const saved = await getTelegramConfig();
+        const botToken = String(req.body?.botToken || saved.botToken || '');
+        const channelId = String(req.body?.channelId || saved.channelId || '');
+        const result = await sendTelegramMessage(
+          botToken,
+          channelId,
+          '✅ <b>Ujian Sambungan Berjaya!</b>\n\nBot TopupBalz telah bersambung dengan Telegram Info Channel ini. Notifikasi pembelian baharu akan dipaparkan di sini.'
+        );
+        if (!result.ok) {
+          res.status(400).json({ error: result.error || 'Ujian gagal.' });
+          return;
+        }
+        res.json({ ok: true });
+      } catch (error: unknown) {
+        sendRouteError(res, error, 'Gagal menguji sambungan Telegram.');
+      }
+    }
   );
 
-  // Admin Dashboard Route
-  if (isAdmin) {
-    return (
-      <AdminDashboard
-        store={adminStoreView}
-        onUpdateOrder={handleUpdateOrder}
-        onDeleteOrder={handleDeleteOrder}
-        onSaveBrand={handleSaveBrand}
-        onDeleteBrand={handleDeleteBrand}
-        onUpdateCategories={handleUpdateCategories}
-        onUpdateHomeSections={handleUpdateHomeSections}
-        onUpdateSliders={handleUpdateSliders}
-        onUpdateVouchers={handleUpdateVouchers}
-        onUpdateFaqs={handleUpdateFaqs}
-        onUpdateInfoPosts={handleUpdateInfoPosts}
-        onUpdatePaymentAccounts={handleUpdatePaymentAccounts}
-        onUpdateWhatsappTemplates={handleUpdateWhatsappTemplates}
-        onUpdateSettings={handleUpdateSettings}
-        onImportState={(next) => {
-          const merged: TopupBalzStoreState = {
-            ...next,
-            user: store.user,
-            orders: adminOrders,
-          };
-          setStore(merged);
-          persistStoreConfig(merged);
-          if (Array.isArray(next.infoPosts)) {
-            handleUpdateInfoPosts(next.infoPosts);
-          }
-        }}
-        onResetState={() => {
-          const resetStore: TopupBalzStoreState = {
-            ...INITIAL_STORE_STATE,
-            user: store.user,
-            orders: adminOrders,
-          };
-          setStore(resetStore);
-          persistStoreConfig(resetStore);
-          handleUpdateInfoPosts(INITIAL_STORE_STATE.infoPosts);
-        }}
-        onBackToStore={() => navigate('/')}
-        onRequireAdminLogin={() => handleRequireLogin('/admin')}
-      />
-    );
-  }
-
-  // Auth Routes
-  if (
-    currentPath === '/login' ||
-    currentPath === '/register' ||
-    currentPath === '/forgot-password'
-  ) {
-    const mode =
-      currentPath === '/register'
-        ? 'register'
-        : currentPath === '/forgot-password'
-          ? 'forgot'
-          : 'login';
-    return (
-      <div className="flex min-h-screen flex-col pb-16">
-        <MainHeader
-          appName={store.settings.title}
-          currentPath={currentPath}
-          showBackButton
-          appearance={appearance}
-          onChangeAppearance={setAppearance}
-          user={store.user}
-          onNavigate={navigate}
-          onLogout={handleLogout}
-        />
-        <AuthView
-          mode={mode}
-          appName={store.settings.title}
-          returnPath={pendingReturnPath}
-          onSuccessAuth={(nextUser) => {
-            setStore((prev) => ({ ...prev, user: nextUser }));
-            setPendingReturnPath(null);
-            refreshOrdersForUser(nextUser.role);
-          }}
-          onNavigate={navigate}
-        />
-        <MainFooter settings={store.settings} onNavigate={navigate} />
-        <BottomNavBar currentPath={currentPath} onNavigate={navigate} />
-      </div>
-    );
-  }
-
-  // Maintenance Gate (for non-admin storefront)
-  if (store.settings.maintenanceActive) {
-    return (
-      <div className="flex min-h-screen flex-col pb-16">
-        <MainHeader
-          appName={store.settings.title}
-          currentPath={currentPath}
-          appearance={appearance}
-          onChangeAppearance={setAppearance}
-          user={store.user}
-          onNavigate={navigate}
-          onLogout={handleLogout}
-        />
-        <MaintenanceView
-          settings={store.settings}
-          onOpenAdmin={() => navigate('/admin')}
-        />
-        <MainFooter settings={store.settings} onNavigate={navigate} />
-        <BottomNavBar currentPath={currentPath} onNavigate={navigate} />
-      </div>
-    );
-  }
-
-  const showBackButton = Boolean(brandSlugMatch || txRefMatch);
-
-  return (
-    <div className="flex min-h-screen flex-col pb-16">
-      <MainHeader
-        appName={store.settings.title}
-        currentPath={currentPath}
-        showBackButton={showBackButton}
-        appearance={appearance}
-        onChangeAppearance={setAppearance}
-        user={store.user}
-        onNavigate={navigate}
-        onLogout={handleLogout}
-      />
-
-      {brandSlugMatch ? (
-        matchedBrand ? (
-          <BrandDetailView
-            brand={matchedBrand}
-            store={store}
-            onCreateOrder={handleCreateOrder}
-            onOrderCreated={(ref) => navigate(`/transaction/${ref}`)}
-            onRequireLogin={() =>
-              handleRequireLogin(`/brand/${matchedBrand.slug}`)
-            }
-          />
-        ) : (
-          <main className="mx-auto max-w-3xl flex-1 px-4 py-12 text-center space-y-3">
-            <h1 className="font-display text-xl font-bold text-slate-900 dark:text-white">
-              Game Tidak Ditemui
-            </h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              Produk yang anda cari tidak wujud atau telah dinyahaktifkan.
-            </p>
-            <button
-              type="button"
-              onClick={() => navigate('/')}
-              className="px-4 py-2 rounded-lg bg-orange-600 text-xs font-semibold text-white cursor-pointer"
-            >
-              Kembali ke Home
-            </button>
-          </main>
-        )
-      ) : txRefMatch ? (
-        matchedOrder ? (
-          <TransactionShowView
-            order={matchedOrder}
-            store={store}
-            onUploadProof={handleUploadProof}
-          />
-        ) : (
-          <main className="mx-auto max-w-3xl flex-1 px-4 py-12 text-center space-y-3">
-            <h1 className="font-display text-xl font-bold text-slate-900 dark:text-white">
-              Invois Tidak Ditemui
-            </h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              {store.user.loggedIn
-                ? `Nombor rujukan ${txRefMatch} tidak ditemui dalam rekod akaun anda.`
-                : 'Sila log masuk untuk melihat butiran invois pesanan anda.'}
-            </p>
-            <button
-              type="button"
-              onClick={() =>
-                navigate(store.user.loggedIn ? '/profile' : '/login')
-              }
-              className="px-4 py-2 rounded-lg bg-orange-600 text-xs font-semibold text-white cursor-pointer"
-            >
-              {store.user.loggedIn ? 'Semak di Profil' : 'Log Masuk Sekarang'}
-            </button>
-          </main>
-        )
-      ) : currentPath === '/transaction' ? (
-        <TransactionCheckView
-          transactions={publicTransactions}
-          onGoToProfile={() => navigate('/profile')}
-        />
-      ) : currentPath === '/info' ? (
-        <InfoView posts={store.infoPosts} />
-      ) : currentPath === '/profile' ? (
-        <ProfileView
-          user={store.user}
-          orders={myOrders}
-          onUpdateUser={handleUpdateUser}
-          onViewOrder={(ref) => navigate(`/transaction/${ref}`)}
-          onNavigateAuth={(mode) => navigate(`/${mode}`)}
-          onOpenAdmin={() => navigate('/admin')}
-          onLogout={handleLogout}
-        />
-      ) : currentPath === '/terms' ? (
-        <StaticContentPage
-          title="Syarat & Ketentuan"
-          body={store.settings.termsText}
-        />
-      ) : currentPath === '/privacy-policy' ? (
-        <StaticContentPage
-          title="Kebijakan Privasi"
-          body={store.settings.privacyPolicyText}
-        />
-      ) : (
-        <HomeView
-          store={store}
-          onSelectBrand={(slug) => navigate(`/brand/${slug}`)}
-        />
-      )}
-
-      <MainFooter settings={store.settings} onNavigate={navigate} />
-      <BottomNavBar currentPath={currentPath} onNavigate={navigate} />
-    </div>
-  );
+  return app;
 }

@@ -1,4 +1,3 @@
-import path from 'node:path';
 import dotenv from 'dotenv';
 import express from 'express';
 import { adminAuth } from './src/lib/firebase-admin.ts';
@@ -79,9 +78,8 @@ function sendRouteError(
   res.status(500).json({ error: msg });
 }
 
-async function startServer() {
-  const app = express();
-  app.use(express.json({ limit: '5mb' }));
+export const app = express();
+app.use(express.json({ limit: '5mb' }));
 
   // Health Check
   app.get('/api/health', (_req, res) => {
@@ -716,28 +714,18 @@ async function startServer() {
     }
   );
 
-  // Frontend Serving (Vite dev middleware or static dist)
-  if (process.env.NODE_ENV !== 'production') {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distDir = path.resolve(import.meta.dirname, 'dist');
-    app.use(express.static(distDir));
-    app.use((_req, res) => {
-      res.sendFile(path.join(distDir, 'index.html'));
-    });
-  }
-
+// Local development only. On Vercel, the API function exports this Express app
+// while Vercel serves the Vite dist/ directory as static assets.
+if (process.env.NODE_ENV !== 'production') {
+  const { createServer: createViteServer } = await import('vite');
+  const vite = await createViteServer({
+    server: { middlewareMode: true },
+    appType: 'spa',
+  });
+  app.use(vite.middlewares);
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`TopupBalz server running on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start TopupBalz server:', err);
-  process.exit(1);
-});
+export default app;

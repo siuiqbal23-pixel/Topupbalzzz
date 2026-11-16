@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import type { DecodedIdToken } from 'firebase-admin/auth';
-import { adminAuth } from '../lib/firebase-admin.ts';
+import { adminAuth } from '../lib/firebase-admin.js';
 
 export interface AuthRequest extends Request {
   user?: DecodedIdToken;

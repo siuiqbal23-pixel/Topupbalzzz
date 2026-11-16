@@ -9,23 +9,32 @@ declare global {
 export const createPool = () => {
   if (!global._postgresPool) {
     const connectionString = process.env.POSTGRES_URL || process.env.SQL_URL;
-    global._postgresPool = new Pool(
-      connectionString
-        ? {
-            connectionString,
-            ssl: { rejectUnauthorized: false },
-            max: 5,
-            connectionTimeoutMillis: 15000,
-          }
-        : {
-            host: process.env.SQL_HOST,
-            user: process.env.SQL_USER,
-            password: process.env.SQL_PASSWORD,
-            database: process.env.SQL_DB_NAME,
-            max: 5,
-            connectionTimeoutMillis: 15000,
-          }
-    );
+    if (connectionString) {
+      // Keep TLS configuration in the Pool options. SSL query parameters in
+      // the URL override the explicit ssl object in node-postgres.
+      const parsedUrl = new URL(connectionString);
+      parsedUrl.searchParams.delete('sslmode');
+      parsedUrl.searchParams.delete('sslrootcert');
+      parsedUrl.searchParams.delete('sslcert');
+      parsedUrl.searchParams.delete('sslkey');
+
+      global._postgresPool = new Pool({
+        connectionString: parsedUrl.toString(),
+        ssl: { rejectUnauthorized: false },
+        max: 5,
+        connectionTimeoutMillis: 15000,
+      });
+    } else {
+      global._postgresPool = new Pool({
+        host: process.env.SQL_HOST,
+        user: process.env.SQL_USER,
+        password: process.env.SQL_PASSWORD,
+        database: process.env.SQL_DB_NAME,
+        ssl: { rejectUnauthorized: false },
+        max: 5,
+        connectionTimeoutMillis: 15000,
+      });
+    }
 
     global._postgresPool.on('error', (err) => {
       console.error('Unexpected error on idle SQL pool client:', err);

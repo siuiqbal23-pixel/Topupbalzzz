@@ -37,10 +37,6 @@ async function apiFetch<T>(
       headers,
     });
 
-        const ct = resp.headers.get('content-type') || '';
-    if (resp.ok && !ct.includes('application/json')) {
-      throw new Error('API tidak tersedia');
-    }
     const data = await resp.json().catch(() => ({}));
     if (resp.ok) {
       return data as T;
@@ -62,11 +58,7 @@ export async function fetchBootstrap(): Promise<{
   config: Partial<TopupBalzStoreState> | null;
   infoPosts: InfoPost[];
 }> {
-  const d: any = await apiFetch('/api/bootstrap');
-  if (!d || !Array.isArray(d.infoPosts)) {
-    throw new Error('API tidak tersedia');
-  }
-  return d;
+  return apiFetch('/api/bootstrap');
 }
 
 export async function fetchPublicTransactions(): Promise<{

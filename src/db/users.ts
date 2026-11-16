@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
-import { db } from './index.js';
-import { users } from './schema.js';
+import { db } from './index.ts';
+import { users } from './schema.ts';
 
 const OWNER_ADMIN_EMAIL = 'siuiqbal23@gmail.com';
 

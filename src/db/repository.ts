@@ -1,14 +1,14 @@
 import crypto from 'node:crypto';
 import { and, desc, eq, gt } from 'drizzle-orm';
-import { db } from './index.js';
-import { emailOtps, infoPosts, orders, storeConfigs } from './schema.js';
+import { db } from './index.ts';
+import { emailOtps, infoPosts, orders, storeConfigs } from './schema.ts';
 import type {
   InfoPost,
   OrderItem,
   PaymentStatusCode,
   PublicOrderSummary,
   TopupStatusCode,
-} from '../types/store.js';
+} from '../types/store.ts';
 
 function toOrderItem(row: typeof orders.$inferSelect): OrderItem {
   return {

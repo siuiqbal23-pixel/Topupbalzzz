@@ -6,15 +6,26 @@ declare global {
   var _postgresPool: Pool | undefined;
 }
 
+function cleanUrl(raw: string) {
+  try {
+    const u = new URL(raw);
+    for (const k of ['sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'uselibpqcompat']) {
+      u.searchParams.delete(k);
+    }
+    return u.toString();
+  } catch {
+    return raw;
+  }
+}
+
 export const createPool = () => {
   if (!global._postgresPool) {
-    const connectionString =
-      process.env.DATABASE_URL || process.env.POSTGRES_URL || undefined;
+    const raw = process.env.DATABASE_URL || process.env.POSTGRES_URL || '';
 
     global._postgresPool = new Pool(
-      connectionString
+      raw
         ? {
-            connectionString,
+            connectionString: cleanUrl(raw),
             ssl: { rejectUnauthorized: false },
             max: 3,
             connectionTimeoutMillis: 15000,

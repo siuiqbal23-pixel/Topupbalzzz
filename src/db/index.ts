@@ -8,10 +8,11 @@ declare global {
 
 export const createPool = () => {
   if (!global._postgresPool) {
-    const preferredUrl = process.env.TOPUPBALZ_MY_POSTGRES_URL;
+    const preferredUrl = process.env.DATABASE_URL;
+    const integrationUrl = process.env.TOPUPBALZ_MY_POSTGRES_URL;
     const fallbackUrl = process.env.POSTGRES_URL || process.env.SQL_URL;
-    const connectionString = preferredUrl || fallbackUrl;
-    const selectedEnv = preferredUrl ? 'TOPUPBALZ_MY_POSTGRES_URL' : fallbackUrl ? 'POSTGRES_URL/SQL_URL' : 'individual SQL_* variables';
+    const connectionString = preferredUrl || integrationUrl || fallbackUrl;
+    const selectedEnv = preferredUrl ? 'DATABASE_URL' : integrationUrl ? 'TOPUPBALZ_MY_POSTGRES_URL' : fallbackUrl ? 'POSTGRES_URL/SQL_URL' : 'individual SQL_* variables';
 
     if (connectionString) {
       const parsedUrl = new URL(connectionString);

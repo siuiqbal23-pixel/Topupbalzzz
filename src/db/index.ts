@@ -21,7 +21,7 @@ export const createPool = () => {
       parsedUrl.searchParams.delete('sslkey');
 
       // Log only non-secret connection metadata to diagnose environment mismatches.
-      console.info('[db-diagnostic] connection source:', selectedEnv, 'host:', parsedUrl.hostname, 'database:', parsedUrl.pathname.replace(/^\\//, ''));
+      console.info('[db-diagnostic] connection source:', selectedEnv, 'host:', parsedUrl.hostname, 'database:', parsedUrl.pathname.slice(1));
 
       global._postgresPool = new Pool({
         connectionString: parsedUrl.toString(),

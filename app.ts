@@ -5,6 +5,8 @@ import { requireAuth, type AuthRequest } from './src/middleware/auth.js';
 import {
   getOrCreateUser,
   getUserByUid,
+  listAllUsersForAdmin,
+  touchUserLastSeen,
   updateUserProfile,
 } from './src/db/users.js';
 import {
@@ -14,16 +16,19 @@ import {
   deleteOrderByReference,
   getAllOrdersForAdmin,
   getOrderRowByReference,
+  getPublicEmailOtpConfig,
   getPublicTransactions,
   getStoreConfigJson,
   getTelegramConfig,
   getUserOrders,
   listInfoPosts,
   replaceInfoPosts,
+  saveEmailOtpConfig,
   saveStoreConfigJson,
   saveTelegramConfig,
   sendTelegramMessage,
   sendTelegramOrderNotification,
+  testGmailSmtpConnection,
   updateOrderByReference,
   verifyEmailOtp,
 } from './src/db/repository.js';
@@ -105,6 +110,8 @@ export function buildApp() {
             ? { ...(sanitizedConfig.settings as Record<string, unknown>) }
             : {};
         delete rawSettings.adminPin;
+        rawSettings.promoBannerEnabled = false;
+        rawSettings.promoBannerText = '';
         const waDigits = String(rawSettings.whatsappCs || '').replace(/\D/g, '');
         const phoneStr = String(rawSettings.phone || '').trim();
         if (
@@ -243,6 +250,59 @@ export function buildApp() {
     }
   });
 
+  // Complete/link password signup for an existing Firebase account (e.g. created via Google Sign-In)
+  // after verifying fresh Email OTP ownership
+  app.post('/api/auth/complete-existing-signup', async (req, res) => {
+    try {
+      const email = String(req.body?.email || '').trim().toLowerCase();
+      const password = String(req.body?.password || '');
+      const name = String(req.body?.name || '').trim();
+      const otpVerificationToken = String(
+        req.body?.otpVerificationToken || ''
+      ).trim();
+
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        res.status(400).json({ error: 'Format e-mel tidak sah.' });
+        return;
+      }
+      if (password.length < 6) {
+        res.status(400).json({ error: 'Kata laluan minimum 6 aksara.' });
+        return;
+      }
+      if (!otpVerificationToken) {
+        res.status(400).json({ error: 'Sila sahkan kod OTP e-mel dahulu.' });
+        return;
+      }
+
+      const otpValid = await checkVerifiedOtpToken(email, otpVerificationToken);
+      if (!otpValid) {
+        res.status(400).json({
+          error: 'Pengesahan OTP tidak sah atau tamat tempoh. Sila minta kod OTP baharu.',
+        });
+        return;
+      }
+
+      try {
+        const fbUser = await adminAuth.getUserByEmail(email);
+        await adminAuth.updateUser(fbUser.uid, {
+          password,
+          ...(name ? { displayName: name } : {}),
+          emailVerified: true,
+        });
+      } catch {
+        res.status(409).json({
+          error:
+            'E-mel ini sudah mempunyai akaun (mungkin didaftarkan dengan Google). Sila gunakan "Teruskan dengan Google" atau tekan "Lupa kata laluan?" di halaman Log Masuk.',
+        });
+        return;
+      }
+
+      res.json({ ok: true });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal melengkapkan pendaftaran akaun.');
+    }
+  });
+
   // Sync Firebase Auth user with PostgreSQL users table
   app.post('/api/auth/sync', requireAuth, async (req: AuthRequest, res) => {
     try {
@@ -299,6 +359,9 @@ export function buildApp() {
     try {
       const uid = req.user!.uid;
       const existing = await getUserByUid(uid);
+      if (existing) {
+        touchUserLastSeen(uid).catch(() => {});
+      }
       const dbUser =
         existing ??
         (await getOrCreateUser({
@@ -479,6 +542,79 @@ export function buildApp() {
       sendTelegramOrderNotification(created, 'new').catch((tgErr) => {
         console.warn('Telegram order notification skipped:', tgErr);
       });
+
+      // Auto-increment Promosi Game per-item claimedCount if order matches an active promo item
+      try {
+        const cfg = await getStoreConfigJson();
+        const promo =
+          cfg && typeof cfg.gamePromo === 'object' && cfg.gamePromo !== null
+            ? (cfg.gamePromo as Record<string, unknown>)
+            : null;
+        if (promo && promo.active === true) {
+          const endMs = new Date(String(promo.endAt || '')).getTime();
+          if (Number.isFinite(endMs) && endMs > Date.now()) {
+            const items = Array.isArray(promo.items)
+              ? (promo.items as Array<Record<string, unknown>>)
+              : [];
+            if (items.length > 0) {
+              const matchIdx = items.findIndex(
+                (it) =>
+                  it &&
+                  String(it.brandId) === created.brandId &&
+                  String(it.productId) === created.productId
+              );
+              if (matchIdx >= 0) {
+                const matched = items[matchIdx];
+                const itemMax = Math.max(
+                  1,
+                  Number(matched.maxQuota ?? promo.maxQuota ?? 10)
+                );
+                const itemClaimed = Math.max(
+                  0,
+                  Number(matched.claimedCount ?? 0)
+                );
+                if (itemClaimed < itemMax) {
+                  const nextItems = items.map((row, idx) =>
+                    idx === matchIdx
+                      ? {
+                          ...row,
+                          maxQuota: itemMax,
+                          claimedCount: itemClaimed + 1,
+                        }
+                      : row
+                  );
+                  await saveStoreConfigJson({
+                    ...cfg,
+                    gamePromo: {
+                      ...promo,
+                      items: nextItems,
+                    },
+                  });
+                }
+              }
+            } else {
+              const brandIds = Array.isArray(promo.brandIds)
+                ? promo.brandIds
+                : [];
+              if (brandIds.includes(created.brandId)) {
+                const maxQuota = Math.max(0, Number(promo.maxQuota || 0));
+                const claimedCount = Math.max(0, Number(promo.claimedCount || 0));
+                if (maxQuota > 0 && claimedCount < maxQuota) {
+                  await saveStoreConfigJson({
+                    ...cfg,
+                    gamePromo: {
+                      ...promo,
+                      claimedCount: claimedCount + 1,
+                    },
+                  });
+                }
+              }
+            }
+          }
+        }
+      } catch (promoErr) {
+        console.warn('Game promo quota increment skipped:', promoErr);
+      }
 
       res.status(201).json({ order: created });
     } catch (error: unknown) {
@@ -713,6 +849,158 @@ export function buildApp() {
       }
     }
   );
+
+  // Admin: Get Email OTP (Gmail SMTP) Config
+  app.get('/api/admin/email-otp', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!(await isAdminUser(req))) {
+        res.status(403).json({ error: 'Akses admin diperlukan.' });
+        return;
+      }
+      const emailOtp = await getPublicEmailOtpConfig();
+      res.json({ emailOtp });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal memuatkan tetapan E-mel OTP.');
+    }
+  });
+
+  // Admin: Save Email OTP (Gmail SMTP) Config
+  app.put('/api/admin/email-otp', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!(await isAdminUser(req))) {
+        res.status(403).json({ error: 'Akses admin diperlukan.' });
+        return;
+      }
+      const saved = await saveEmailOtpConfig({
+        enabled: Boolean(req.body?.enabled),
+        gmailUser: String(req.body?.gmailUser || ''),
+        gmailAppPassword:
+          typeof req.body?.gmailAppPassword === 'string'
+            ? req.body.gmailAppPassword
+            : undefined,
+        senderName: String(req.body?.senderName || 'TopupBalz'),
+      });
+      res.json({ emailOtp: saved });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal menyimpan tetapan E-mel OTP.');
+    }
+  });
+
+  // Admin: Test Gmail SMTP OTP Delivery
+  app.post(
+    '/api/admin/email-otp/test',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!(await isAdminUser(req))) {
+          res.status(403).json({ error: 'Akses admin diperlukan.' });
+          return;
+        }
+        const result = await testGmailSmtpConnection({
+          gmailUser:
+            typeof req.body?.gmailUser === 'string'
+              ? req.body.gmailUser
+              : undefined,
+          gmailAppPassword:
+            typeof req.body?.gmailAppPassword === 'string'
+              ? req.body.gmailAppPassword
+              : undefined,
+          senderName:
+            typeof req.body?.senderName === 'string'
+              ? req.body.senderName
+              : undefined,
+          toEmail:
+            typeof req.body?.toEmail === 'string'
+              ? req.body.toEmail
+              : req.user?.email || undefined,
+        });
+        if (!result.ok) {
+          res.status(400).json({ error: result.error || 'Ujian gagal.' });
+          return;
+        }
+        res.json({ ok: true });
+      } catch (error: unknown) {
+        sendRouteError(res, error, 'Gagal menguji penghantaran Gmail OTP.');
+      }
+    }
+  );
+
+  // Admin: List all registered/logged-in user emails & activity
+  app.get('/api/admin/users', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!(await isAdminUser(req))) {
+        res.status(403).json({ error: 'Akses admin diperlukan.' });
+        return;
+      }
+
+      const dbUsers = await listAllUsersForAdmin();
+      const byUid = new Map(
+        dbUsers.map((u) => [
+          u.uid,
+          {
+            ...u,
+            providers: [] as string[],
+          },
+        ])
+      );
+
+      // Best-effort merge with Firebase Auth listUsers so Admin sees provider type and any Firebase accounts
+      try {
+        const fbList = await adminAuth.listUsers(1000);
+        for (const fb of fbList.users) {
+          const email = (fb.email || '').trim();
+          if (!email) continue;
+          const providers = fb.providerData.map((p) => p.providerId);
+          const existing = byUid.get(fb.uid);
+          const fbLastSignIn = fb.metadata.lastSignInTime
+            ? new Date(fb.metadata.lastSignInTime).toISOString()
+            : undefined;
+          const fbCreated = fb.metadata.creationTime
+            ? new Date(fb.metadata.creationTime).toISOString()
+            : undefined;
+
+          if (existing) {
+            existing.providers = providers;
+            if (fb.emailVerified) existing.emailVerified = true;
+            if (
+              fbLastSignIn &&
+              new Date(fbLastSignIn).getTime() >
+                new Date(existing.lastLoginAt).getTime()
+            ) {
+              existing.lastLoginAt = fbLastSignIn;
+            }
+          } else {
+            byUid.set(fb.uid, {
+              uid: fb.uid,
+              email,
+              name: fb.displayName || email.split('@')[0] || 'Pelanggan',
+              phone: fb.phoneNumber || '',
+              role:
+                email.toLowerCase() === OWNER_ADMIN_EMAIL
+                  ? 'admin'
+                  : 'customer',
+              emailVerified: Boolean(fb.emailVerified),
+              orderCount: 0,
+              totalSpent: 0,
+              createdAt: fbCreated || new Date().toISOString(),
+              lastLoginAt: fbLastSignIn || fbCreated || new Date().toISOString(),
+              providers,
+            });
+          }
+        }
+      } catch {
+        // Ignore if Firebase Admin listUsers IAM permission is unavailable
+      }
+
+      const usersList = Array.from(byUid.values()).sort(
+        (a, b) =>
+          new Date(b.lastLoginAt).getTime() - new Date(a.lastLoginAt).getTime()
+      );
+      res.json({ users: usersList });
+    } catch (error: unknown) {
+      sendRouteError(res, error, 'Gagal memuatkan senarai pengguna.');
+    }
+  });
 
   return app;
 }

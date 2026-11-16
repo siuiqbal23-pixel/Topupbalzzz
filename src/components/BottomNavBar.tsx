@@ -38,6 +38,7 @@ export function BottomNavBar({ currentPath, onNavigate }: BottomNavBarProps) {
   const isInfo = currentPath === '/info';
   const isProfile =
     currentPath === '/profile' ||
+    currentPath === '/settings' ||
     currentPath === '/login' ||
     currentPath === '/register' ||
     currentPath === '/forgot-password';

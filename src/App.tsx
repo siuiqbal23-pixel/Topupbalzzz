@@ -16,8 +16,12 @@ import {
 import { TransactionCheckView } from './components/TransactionCheckView';
 import { TransactionShowView } from './components/TransactionShowView';
 import {
+  DEFAULT_GAME_PROMO,
   INITIAL_STORE_STATE,
   formatLocalMyPhone,
+  getPromoItemQuota,
+  isGamePromoLive,
+  isGamePromoWithinTime,
   isPlaceholderPhoneValue,
   resolvePaymentAccountDisplay,
 } from './data/initialStoreData';
@@ -42,6 +46,7 @@ import type {
   BrandItem,
   CategoryItem,
   FaqItem,
+  GamePromoConfig,
   HomeSection,
   InfoPost,
   ManualPaymentAccount,
@@ -76,6 +81,7 @@ function applyTheme(mode: AppearanceMode) {
 
 export default function App() {
   const [store, setStore] = useState<TopupBalzStoreState>(INITIAL_STORE_STATE);
+  const safeUser = store.user ?? INITIAL_STORE_STATE.user;
   const [publicTransactions, setPublicTransactions] = useState<
     PublicOrderSummary[]
   >([]);
@@ -91,6 +97,9 @@ export default function App() {
   const [pendingReturnPath, setPendingReturnPath] = useState<string | null>(
     null
   );
+  const [preselectedProductId, setPreselectedProductId] = useState<
+    string | undefined
+  >(undefined);
 
   const refreshPublicTransactions = useCallback(() => {
     fetchPublicTransactions()
@@ -182,6 +191,9 @@ export default function App() {
               ? { ...prev.whatsappTemplates, ...boot.config.whatsappTemplates }
               : prev.whatsappTemplates,
             settings: nextSettings,
+            gamePromo: boot.config?.gamePromo
+              ? { ...DEFAULT_GAME_PROMO, ...boot.config.gamePromo }
+              : prev.gamePromo,
             infoPosts:
               boot.infoPosts.length > 0 || boot.config !== null
                 ? boot.infoPosts
@@ -211,6 +223,9 @@ export default function App() {
 
       try {
         const { user: profile } = await fetchMyProfile();
+        if (!profile) {
+          throw new Error('Profil tidak sah.');
+        }
         setStore((prev) => ({
           ...prev,
           user: profile,
@@ -259,14 +274,16 @@ export default function App() {
 
   useEffect(() => {
     const handlePopState = () => {
+      setPreselectedProductId(undefined);
       setCurrentPath(window.location.pathname || '/');
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  const navigate = (path: string) => {
+  const navigate = (path: string, options?: { productId?: string }) => {
     const target = path || '/';
+    setPreselectedProductId(options?.productId);
     if (window.location.pathname !== target) {
       window.history.pushState({}, '', target);
     }
@@ -307,7 +324,7 @@ export default function App() {
   }, [txRefMatch, myOrders, adminOrders, lookedUpOrder]);
 
   useEffect(() => {
-    if (!txRefMatch || !store.user.loggedIn || matchedOrder) return;
+    if (!txRefMatch || !safeUser.loggedIn || matchedOrder) return;
     let cancelled = false;
     fetchOrderByReference(txRefMatch)
       .then((res) => {
@@ -319,10 +336,10 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [txRefMatch, store.user.loggedIn, matchedOrder]);
+  }, [txRefMatch, safeUser.loggedIn, matchedOrder]);
 
   const persistStoreConfig = (next: TopupBalzStoreState) => {
-    if (!auth.currentUser || next.user.role !== 'admin') return;
+    if (!auth.currentUser || (next.user ?? safeUser).role !== 'admin') return;
     const {
       categories,
       homeSections,
@@ -333,6 +350,7 @@ export default function App() {
       paymentAccounts,
       whatsappTemplates,
       settings,
+      gamePromo,
     } = next;
     saveAdminStoreConfigApi({
       categories,
@@ -344,6 +362,7 @@ export default function App() {
       paymentAccounts,
       whatsappTemplates,
       settings,
+      gamePromo,
     }).catch((err) => {
       console.error('Failed to persist store configuration:', err);
     });
@@ -356,7 +375,7 @@ export default function App() {
       'id' | 'reference' | 'createdAt' | 'paymentStatus' | 'topupStatus'
     >
   ): Promise<OrderItem | null> => {
-    if (!store.user.loggedIn || !auth.currentUser) {
+    if (!safeUser.loggedIn || !auth.currentUser) {
       setPendingReturnPath(`/brand/${payload.brandSlug}`);
       navigate('/login');
       return null;
@@ -367,6 +386,48 @@ export default function App() {
     if (store.user.role === 'admin') {
       setAdminOrders((prev) => [order, ...prev]);
     }
+    setStore((prev) => {
+      const promo = prev.gamePromo;
+      if (!promo || !isGamePromoWithinTime(promo) || !isGamePromoLive(promo)) {
+        return prev;
+      }
+      const items = Array.isArray(promo.items) ? promo.items : [];
+      if (items.length > 0) {
+        const matchIdx = items.findIndex(
+          (it) =>
+            it.brandId === payload.brandId && it.productId === payload.productId
+        );
+        if (matchIdx < 0) return prev;
+        const quota = getPromoItemQuota(items[matchIdx], promo);
+        if (quota.isFull) return prev;
+        const nextItems = items.map((it, idx) =>
+          idx === matchIdx
+            ? {
+                ...it,
+                maxQuota: quota.maxQuota,
+                claimedCount: quota.claimedCount + 1,
+              }
+            : it
+        );
+        return {
+          ...prev,
+          gamePromo: {
+            ...promo,
+            items: nextItems,
+          },
+        };
+      }
+      if (!promo.brandIds.includes(payload.brandId)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        gamePromo: {
+          ...promo,
+          claimedCount: Math.min(promo.maxQuota, promo.claimedCount + 1),
+        },
+      };
+    });
     refreshPublicTransactions();
     return order;
   };
@@ -493,7 +554,7 @@ export default function App() {
 
   const handleUpdateInfoPosts = (infoPosts: InfoPost[]) => {
     setStore((prev) => ({ ...prev, infoPosts }));
-    if (auth.currentUser && store.user.role === 'admin') {
+    if (auth.currentUser && safeUser.role === 'admin') {
       saveAdminInfoPostsApi(infoPosts).catch((err) => {
         console.error('Failed to persist info posts:', err);
       });
@@ -561,9 +622,18 @@ export default function App() {
       return next;
     });
 
+  const handleUpdateGamePromo = (gamePromo: GamePromoConfig) =>
+    setStore((prev) => {
+      const next = { ...prev, gamePromo };
+      persistStoreConfig(next);
+      return next;
+    });
+
   const handleUpdateUser = async (patch: { name: string; phone: string }) => {
     const { user } = await updateMyProfile(patch);
-    setStore((prev) => ({ ...prev, user }));
+    if (user) {
+      setStore((prev) => ({ ...prev, user }));
+    }
   };
 
   const handleLogout = async () => {
@@ -590,9 +660,10 @@ export default function App() {
   const adminStoreView: TopupBalzStoreState = useMemo(
     () => ({
       ...store,
+      user: safeUser,
       orders: adminOrders,
     }),
-    [store, adminOrders]
+    [store, safeUser, adminOrders]
   );
 
   // Admin Dashboard Route
@@ -613,10 +684,11 @@ export default function App() {
         onUpdatePaymentAccounts={handleUpdatePaymentAccounts}
         onUpdateWhatsappTemplates={handleUpdateWhatsappTemplates}
         onUpdateSettings={handleUpdateSettings}
+        onUpdateGamePromo={handleUpdateGamePromo}
         onImportState={(next) => {
           const merged: TopupBalzStoreState = {
             ...next,
-            user: store.user,
+            user: safeUser,
             orders: adminOrders,
           };
           setStore(merged);
@@ -628,7 +700,7 @@ export default function App() {
         onResetState={() => {
           const resetStore: TopupBalzStoreState = {
             ...INITIAL_STORE_STATE,
-            user: store.user,
+            user: safeUser,
             orders: adminOrders,
           };
           setStore(resetStore);
@@ -654,25 +726,26 @@ export default function App() {
           ? 'forgot'
           : 'login';
     return (
-      <div className="flex min-h-screen flex-col pb-16">
+      <div className="flex min-h-screen w-full max-w-full flex-col overflow-x-clip pb-16">
         <MainHeader
           appName={store.settings.title}
           currentPath={currentPath}
           showBackButton
           appearance={appearance}
           onChangeAppearance={setAppearance}
-          user={store.user}
+          user={safeUser}
           onNavigate={navigate}
-          onLogout={handleLogout}
         />
         <AuthView
           mode={mode}
           appName={store.settings.title}
           returnPath={pendingReturnPath}
           onSuccessAuth={(nextUser) => {
-            setStore((prev) => ({ ...prev, user: nextUser }));
+            if (nextUser) {
+              setStore((prev) => ({ ...prev, user: nextUser }));
+              refreshOrdersForUser(nextUser.role);
+            }
             setPendingReturnPath(null);
-            refreshOrdersForUser(nextUser.role);
           }}
           onNavigate={navigate}
         />
@@ -685,15 +758,14 @@ export default function App() {
   // Maintenance Gate (for non-admin storefront)
   if (store.settings.maintenanceActive) {
     return (
-      <div className="flex min-h-screen flex-col pb-16">
+      <div className="flex min-h-screen w-full max-w-full flex-col overflow-x-clip pb-16">
         <MainHeader
           appName={store.settings.title}
           currentPath={currentPath}
           appearance={appearance}
           onChangeAppearance={setAppearance}
-          user={store.user}
+          user={safeUser}
           onNavigate={navigate}
-          onLogout={handleLogout}
         />
         <MaintenanceView
           settings={store.settings}
@@ -705,26 +777,28 @@ export default function App() {
     );
   }
 
-  const showBackButton = Boolean(brandSlugMatch || txRefMatch);
+  const showBackButton = Boolean(
+    brandSlugMatch || txRefMatch || currentPath === '/settings'
+  );
 
   return (
-    <div className="flex min-h-screen flex-col pb-16">
+    <div className="flex min-h-screen w-full max-w-full flex-col overflow-x-clip pb-16">
       <MainHeader
         appName={store.settings.title}
         currentPath={currentPath}
         showBackButton={showBackButton}
         appearance={appearance}
         onChangeAppearance={setAppearance}
-        user={store.user}
+        user={safeUser}
         onNavigate={navigate}
-        onLogout={handleLogout}
       />
 
       {brandSlugMatch ? (
         matchedBrand ? (
           <BrandDetailView
             brand={matchedBrand}
-            store={store}
+            store={{ ...store, user: safeUser }}
+            initialProductId={preselectedProductId}
             onCreateOrder={handleCreateOrder}
             onOrderCreated={(ref) => navigate(`/transaction/${ref}`)}
             onRequireLogin={() =>
@@ -752,7 +826,7 @@ export default function App() {
         matchedOrder ? (
           <TransactionShowView
             order={matchedOrder}
-            store={store}
+            store={{ ...store, user: safeUser }}
             onUploadProof={handleUploadProof}
           />
         ) : (
@@ -761,18 +835,18 @@ export default function App() {
               Invois Tidak Ditemui
             </h1>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              {store.user.loggedIn
+              {safeUser.loggedIn
                 ? `Nombor rujukan ${txRefMatch} tidak ditemui dalam rekod akaun anda.`
                 : 'Sila log masuk untuk melihat butiran invois pesanan anda.'}
             </p>
             <button
               type="button"
               onClick={() =>
-                navigate(store.user.loggedIn ? '/profile' : '/login')
+                navigate(safeUser.loggedIn ? '/profile' : '/login')
               }
               className="px-4 py-2 rounded-lg bg-orange-600 text-xs font-semibold text-white cursor-pointer"
             >
-              {store.user.loggedIn ? 'Semak di Profil' : 'Log Masuk Sekarang'}
+              {safeUser.loggedIn ? 'Semak di Profil' : 'Log Masuk Sekarang'}
             </button>
           </main>
         )
@@ -783,10 +857,13 @@ export default function App() {
         />
       ) : currentPath === '/info' ? (
         <InfoView posts={store.infoPosts} />
-      ) : currentPath === '/profile' ? (
+      ) : currentPath === '/profile' || currentPath === '/settings' ? (
         <ProfileView
-          user={store.user}
+          user={safeUser}
           orders={myOrders}
+          initialTab={currentPath === '/settings' ? 'settings' : 'transactions'}
+          appearance={appearance}
+          onChangeAppearance={setAppearance}
           onUpdateUser={handleUpdateUser}
           onViewOrder={(ref) => navigate(`/transaction/${ref}`)}
           onNavigateAuth={(mode) => navigate(`/${mode}`)}
@@ -805,8 +882,10 @@ export default function App() {
         />
       ) : (
         <HomeView
-          store={store}
-          onSelectBrand={(slug) => navigate(`/brand/${slug}`)}
+          store={{ ...store, user: safeUser }}
+          onSelectBrand={(slug, productId) =>
+            navigate(`/brand/${slug}`, { productId })
+          }
         />
       )}
 

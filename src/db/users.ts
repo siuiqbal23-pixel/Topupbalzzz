@@ -1,6 +1,6 @@
-import { eq } from 'drizzle-orm';
+import { desc, eq, sql } from 'drizzle-orm';
 import { db } from './index.ts';
-import { users } from './schema.ts';
+import { orders, users } from './schema.ts';
 
 const OWNER_ADMIN_EMAIL = 'siuiqbal23@gmail.com';
 
@@ -64,6 +64,63 @@ export async function getUserByUid(uid: string) {
   } catch (error) {
     console.error('Database query failed in getUserByUid:', error);
     throw new Error('Gagal mendapatkan profil pengguna.', { cause: error });
+  }
+}
+
+export async function touchUserLastSeen(uid: string) {
+  try {
+    await db
+      .update(users)
+      .set({ updatedAt: new Date() })
+      .where(eq(users.uid, uid));
+  } catch {
+    // non-fatal activity timestamp update
+  }
+}
+
+export async function listAllUsersForAdmin() {
+  try {
+    const [userRows, orderStats] = await Promise.all([
+      db.select().from(users).orderBy(desc(users.updatedAt)),
+      db
+        .select({
+          userUid: orders.userUid,
+          orderCount: sql<number>`count(*)::int`,
+          totalSpent: sql<number>`coalesce(sum(${orders.totalAmount}), 0)::float8`,
+        })
+        .from(orders)
+        .groupBy(orders.userUid),
+    ]);
+
+    const statsByUid = new Map<
+      string,
+      { orderCount: number; totalSpent: number }
+    >();
+    for (const stat of orderStats) {
+      statsByUid.set(stat.userUid, {
+        orderCount: Number(stat.orderCount || 0),
+        totalSpent: Number(stat.totalSpent || 0),
+      });
+    }
+
+    return userRows.map((u) => {
+      const stat = statsByUid.get(u.uid);
+      return {
+        uid: u.uid,
+        email: u.email,
+        name: u.name,
+        phone: u.phone,
+        role: (u.role === 'admin' ? 'admin' : 'customer') as 'admin' | 'customer',
+        emailVerified: Boolean(u.emailVerified),
+        orderCount: stat?.orderCount ?? 0,
+        totalSpent: stat?.totalSpent ?? 0,
+        createdAt: u.createdAt.toISOString(),
+        lastLoginAt: u.updatedAt.toISOString(),
+      };
+    });
+  } catch (error) {
+    console.error('Database query failed in listAllUsersForAdmin:', error);
+    throw new Error('Gagal memuatkan senarai e-mel pengguna.', { cause: error });
   }
 }
 

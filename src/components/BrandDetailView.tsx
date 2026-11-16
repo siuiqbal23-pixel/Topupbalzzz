@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BadgeCheck,
   Check,
@@ -21,6 +21,9 @@ import {
 } from 'lucide-react';
 import {
   formatMyr,
+  getEffectivePromoBrandIds,
+  getPromoItemQuota,
+  isGamePromoWithinTime,
   normalizePhoneForWa,
   resolvePaymentAccountDisplay,
 } from '../data/initialStoreData';
@@ -36,6 +39,7 @@ import { GameImage } from './GameImage';
 interface BrandDetailViewProps {
   brand: BrandItem;
   store: TopupBalzStoreState;
+  initialProductId?: string;
   onCreateOrder: (
     payload: Omit<
       OrderItem,
@@ -49,6 +53,7 @@ interface BrandDetailViewProps {
 export function BrandDetailView({
   brand,
   store,
+  initialProductId,
   onCreateOrder,
   onOrderCreated,
   onRequireLogin,
@@ -73,8 +78,16 @@ export function BrandDetailView({
   const [accountId, setAccountId] = useState('');
   const [serverId, setServerId] = useState(brand.serverOptions?.[0] ?? '');
   const [selectedProductId, setSelectedProductId] = useState<string>(
-    activeProducts[0]?.id ?? ''
+    (initialProductId && activeProducts.some((p) => p.id === initialProductId)
+      ? initialProductId
+      : activeProducts[0]?.id) ?? ''
   );
+
+  useEffect(() => {
+    if (initialProductId && activeProducts.some((p) => p.id === initialProductId)) {
+      setSelectedProductId(initialProductId);
+    }
+  }, [initialProductId, activeProducts]);
   const [customerName, setCustomerName] = useState(
     store.user.loggedIn ? store.user.name : ''
   );
@@ -169,25 +182,157 @@ export function BrandDetailView({
     reader.readAsDataURL(file);
   };
 
-  const discountAmount = useMemo(() => {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const gamePromo = store.gamePromo;
+
+  useEffect(() => {
+    if (!gamePromo?.active) return;
+    setNowMs(Date.now());
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [gamePromo?.active, gamePromo?.endAt]);
+
+  const activeGamePromo = useMemo(() => {
+    if (!gamePromo) return null;
+    if (!getEffectivePromoBrandIds(gamePromo).includes(brand.id)) return null;
+    if (!isGamePromoWithinTime(gamePromo, nowMs)) return null;
+
+    const promoItems = Array.isArray(gamePromo.items)
+      ? gamePromo.items.filter((it) => it.brandId === brand.id)
+      : [];
+    const hasItemList =
+      Array.isArray(gamePromo.items) && gamePromo.items.length > 0;
+
+    const promoByProductId = new Map<
+      string,
+      {
+        promoPrice: number;
+        maxQuota: number;
+        claimedCount: number;
+        remainingQuota: number;
+        isFull: boolean;
+      }
+    >();
+    let anySlotOpen = false;
+    if (hasItemList) {
+      for (const it of promoItems) {
+        const quota = getPromoItemQuota(it, gamePromo);
+        if (!quota.isFull) anySlotOpen = true;
+        promoByProductId.set(it.productId, {
+          promoPrice: Number(it.promoPrice),
+          ...quota,
+        });
+      }
+    } else {
+      const quota = getPromoItemQuota({}, gamePromo);
+      anySlotOpen = !quota.isFull;
+    }
+
+    if (!anySlotOpen) return null;
+
+    const remainingMs = Math.max(0, new Date(gamePromo.endAt).getTime() - nowMs);
+    const totalSec = Math.floor(remainingMs / 1000);
+    const days = Math.floor(totalSec / 86400);
+    const hours = Math.floor((totalSec % 86400) / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+    const discountPercent = Math.max(
+      0,
+      Math.min(90, Number(gamePromo.discountPercent || 0))
+    );
+    const fallbackQuota = getPromoItemQuota({}, gamePromo);
+
+    return {
+      ...gamePromo,
+      ...fallbackQuota,
+      days,
+      hours,
+      mins,
+      secs,
+      discountPercent,
+      hasItemList,
+      promoByProductId,
+    };
+  }, [gamePromo, brand.id, nowMs]);
+
+  const getProductPromoInfo = (product: ProductItem) => {
+    if (!activeGamePromo) return null;
+    if (activeGamePromo.hasItemList) {
+      const info = activeGamePromo.promoByProductId.get(product.id);
+      if (!info || info.isFull || !Number.isFinite(info.promoPrice)) return null;
+      return {
+        effectivePrice: Math.max(0, Math.min(product.sellPrice, info.promoPrice)),
+        maxQuota: info.maxQuota,
+        remainingQuota: info.remainingQuota,
+      };
+    }
+    if (activeGamePromo.discountPercent > 0 && !activeGamePromo.isFull) {
+      return {
+        effectivePrice: Math.max(
+          0,
+          Math.round(
+            product.sellPrice * (1 - activeGamePromo.discountPercent / 100) * 100
+          ) / 100
+        ),
+        maxQuota: activeGamePromo.maxQuota,
+        remainingQuota: activeGamePromo.remainingQuota,
+      };
+    }
+    return null;
+  };
+
+  const selectedProductPromo = selectedProduct
+    ? getProductPromoInfo(selectedProduct)
+    : null;
+
+  const promoDiscountAmount = useMemo(() => {
+    if (!selectedProduct || !selectedProductPromo) return 0;
+    return Math.max(
+      0,
+      Math.round(
+        (selectedProduct.sellPrice - selectedProductPromo.effectivePrice) * 100
+      ) / 100
+    );
+  }, [selectedProduct, selectedProductPromo]);
+
+  const voucherDiscountAmount = useMemo(() => {
     if (!appliedVoucherCode || !selectedProduct) return 0;
     const voucher = store.vouchers.find(
       (v) => v.active && v.code.toUpperCase() === appliedVoucherCode.toUpperCase()
     );
     if (!voucher) return 0;
-    if (selectedProduct.sellPrice < voucher.minPurchase) return 0;
+    const baseAfterPromo = Math.max(
+      0,
+      selectedProduct.sellPrice - promoDiscountAmount
+    );
+    if (selectedProduct.sellPrice < voucher.minPurchase || baseAfterPromo <= 0) {
+      return 0;
+    }
     if (voucher.type === 'fixed') {
-      return Math.min(voucher.value, selectedProduct.sellPrice);
+      return Math.min(voucher.value, baseAfterPromo);
     }
     return Math.min(
-      Math.round(selectedProduct.sellPrice * (voucher.value / 100) * 100) / 100,
-      selectedProduct.sellPrice
+      Math.round(baseAfterPromo * (voucher.value / 100) * 100) / 100,
+      baseAfterPromo
     );
-  }, [appliedVoucherCode, selectedProduct, store.vouchers]);
+  }, [appliedVoucherCode, selectedProduct, store.vouchers, promoDiscountAmount]);
+
+  const discountAmount = useMemo(() => {
+    if (!selectedProduct) return 0;
+    return Math.min(
+      selectedProduct.sellPrice,
+      Math.round((promoDiscountAmount + voucherDiscountAmount) * 100) / 100
+    );
+  }, [selectedProduct, promoDiscountAmount, voucherDiscountAmount]);
 
   const totalAmount = useMemo(() => {
     if (!selectedProduct) return 0;
-    return Math.max(0, selectedProduct.sellPrice - discountAmount);
+    return Math.max(
+      0,
+      Math.round((selectedProduct.sellPrice - discountAmount) * 100) / 100
+    );
   }, [selectedProduct, discountAmount]);
 
   const handleApplyVoucher = () => {
@@ -280,8 +425,8 @@ export function BrandDetailView({
         totalAmount,
         paymentProofUrl: paymentProofUrl || undefined,
         notes: isTelegramFlow
-          ? 'Pesanan TNG dibuat bersama bukti bayaran. Notifikasi dihantar ke Telegram Info Channel untuk semakan transaksi.'
-          : 'Pesanan manual dibuat. Menunggu pengesahan resit di WhatsApp.',
+          ? `Pesanan TNG dibuat bersama bukti bayaran. Notifikasi dihantar ke Telegram Info Channel untuk semakan transaksi.${promoDiscountAmount > 0 ? ' [Harga Promosi]' : ''}`
+          : `Pesanan manual dibuat. Menunggu pengesahan resit di WhatsApp.${promoDiscountAmount > 0 ? ' [Harga Promosi]' : ''}`,
       });
 
       if (created) {
@@ -299,9 +444,9 @@ export function BrandDetailView({
   const csWaUrl = `https://wa.me/${normalizePhoneForWa(store.settings.whatsappCs)}`;
 
   return (
-    <main className="w-full flex-1">
-      {/* Compact Brand Banner */}
-      <section className="relative h-36 sm:h-48 overflow-hidden bg-slate-900">
+    <main className="w-full max-w-full overflow-x-hidden flex-1">
+      {/* Compact Brand Banner behind Game Logo */}
+      <section className="relative h-40 sm:h-52 w-full overflow-hidden bg-slate-900">
         <GameImage
           src={brand.banner || brand.image}
           alt={brand.name}
@@ -312,8 +457,8 @@ export function BrandDetailView({
         <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/45 to-transparent" />
 
         <div className="absolute right-0 bottom-0 left-0 p-3 sm:p-5">
-          <div className="mx-auto max-w-6xl flex items-end gap-3">
-            <div className="h-14 w-14 sm:h-20 sm:w-20 overflow-hidden rounded-xl border-2 border-white/20 bg-slate-900 shadow-lg shrink-0">
+          <div className="mx-auto max-w-6xl flex items-end gap-3 min-w-0">
+            <div className="h-14 w-14 sm:h-20 sm:w-20 overflow-hidden rounded-xl border-2 border-white/25 bg-slate-900 shadow-lg shrink-0">
               <GameImage
                 src={brand.image}
                 alt={brand.name}
@@ -322,23 +467,23 @@ export function BrandDetailView({
               />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-[11px] font-medium text-orange-400">
+              <p className="text-[11px] font-medium text-orange-400 truncate">
                 {brand.publisher} · {brand.currencyUnit}
               </p>
-              <h1 className="font-display text-lg sm:text-2xl font-bold text-white truncate">
+              <h1 className="font-display text-base sm:text-2xl font-bold text-white truncate">
                 {brand.name}
               </h1>
               <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-200">
                 <span className="inline-flex items-center gap-1">
-                  <Clock className="w-3 h-3 text-orange-400" aria-hidden="true" />
+                  <Clock className="w-3 h-3 text-orange-400 shrink-0" aria-hidden="true" />
                   1–5 Minit
                 </span>
                 <span className="inline-flex items-center gap-1">
-                  <MessageCircle className="w-3 h-3 text-orange-400" aria-hidden="true" />
-                  WhatsApp
+                  <MessageCircle className="w-3 h-3 text-orange-400 shrink-0" aria-hidden="true" />
+                  {isTelegramFlow ? 'Telegram Info' : 'WhatsApp'}
                 </span>
                 <span className="inline-flex items-center gap-1">
-                  <ShieldCheck className="w-3 h-3 text-orange-400" aria-hidden="true" />
+                  <ShieldCheck className="w-3 h-3 text-orange-400 shrink-0" aria-hidden="true" />
                   Tanpa Password
                 </span>
               </div>
@@ -348,13 +493,13 @@ export function BrandDetailView({
       </section>
 
       {/* Main 2-Column Checkout Grid */}
-      <div className="mx-auto max-w-6xl px-3 sm:px-5 py-4 sm:py-6 space-y-4">
+      <div className="mx-auto w-full max-w-6xl px-3 sm:px-5 py-4 sm:py-6 space-y-4">
         {/* Mandatory Login Warning if logged out */}
         {!store.user.loggedIn ? (
-          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-            <div className="flex items-center gap-2 text-xs text-amber-800 dark:text-amber-300">
-              <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
-              <span>
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3.5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 min-w-0">
+            <div className="flex items-start sm:items-center gap-2 text-xs text-amber-800 dark:text-amber-300 min-w-0">
+              <Lock className="w-4 h-4 shrink-0 mt-0.5 sm:mt-0" aria-hidden="true" />
+              <span className="break-words">
                 <span className="font-semibold">Wajib Log Masuk:</span> Anda perlu log masuk akaun terlebih dahulu sebelum membuat pembelian.
               </span>
             </div>
@@ -369,26 +514,64 @@ export function BrandDetailView({
           </div>
         ) : null}
 
-        <div className="grid gap-4 lg:grid-cols-3 items-start">
+        {activeGamePromo ? (
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-1">
+              {activeGamePromo.days > 0 ? (
+                <>
+                  <span className="inline-flex h-6 min-w-[26px] items-center justify-center rounded bg-orange-600 px-1.5 font-mono-tabular text-[11px] font-bold text-white">
+                    {String(activeGamePromo.days).padStart(2, '0')}h
+                  </span>
+                  <span className="font-mono-tabular text-xs font-bold text-orange-500">
+                    :
+                  </span>
+                </>
+              ) : null}
+              <span className="inline-flex h-6 min-w-[26px] items-center justify-center rounded bg-orange-600 px-1.5 font-mono-tabular text-[11px] font-bold text-white">
+                {String(activeGamePromo.hours).padStart(2, '0')}
+              </span>
+              <span className="font-mono-tabular text-xs font-bold text-orange-500">
+                :
+              </span>
+              <span className="inline-flex h-6 min-w-[26px] items-center justify-center rounded bg-orange-600 px-1.5 font-mono-tabular text-[11px] font-bold text-white">
+                {String(activeGamePromo.mins).padStart(2, '0')}
+              </span>
+              <span className="font-mono-tabular text-xs font-bold text-orange-500">
+                :
+              </span>
+              <span className="inline-flex h-6 min-w-[26px] items-center justify-center rounded bg-orange-600 px-1.5 font-mono-tabular text-[11px] font-bold text-white">
+                {String(activeGamePromo.secs).padStart(2, '0')}
+              </span>
+            </div>
+            {selectedProductPromo ? (
+              <span className="font-mono-tabular text-[11px] font-semibold text-orange-600 dark:text-orange-400">
+                Baki {selectedProductPromo.remainingQuota}/
+                {selectedProductPromo.maxQuota} org
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div className="grid gap-4 lg:grid-cols-3 items-start min-w-0">
           {/* Left Column (Steps 1-4 + Description) */}
-          <div className="space-y-4 lg:col-span-2">
+          <div className="space-y-4 lg:col-span-2 min-w-0">
             {/* Step 1: Account Data */}
-            <section className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-4 shadow-sm">
-              <div className="flex items-center gap-2 mb-3">
+            <section className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-3.5 sm:p-4 shadow-sm min-w-0">
+              <div className="flex items-center gap-2 mb-3 min-w-0">
                 <span className="flex h-6 w-6 items-center justify-center rounded-full bg-orange-600 text-[11px] font-bold text-white shrink-0">
                   1
                 </span>
-                <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white truncate">
                   Masukkan Data Akaun Game
                 </h2>
               </div>
 
               <div
-                className={`grid gap-3 ${
+                className={`grid gap-3 min-w-0 ${
                   brand.inputType === 'id+server' ? 'sm:grid-cols-2' : ''
                 }`}
               >
-                <div>
+                <div className="min-w-0">
                   <label
                     htmlFor="accountId"
                     className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
@@ -465,42 +648,57 @@ export function BrandDetailView({
                   Tiada produk tersedia buat masa ini.
                 </p>
               ) : (
-                <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+                <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 min-w-0">
                   {activeProducts.map((product) => {
                     const isSelected = selectedProduct?.id === product.id;
+                    const promoInfo = getProductPromoInfo(product);
+                    const hasPromoPrice = promoInfo !== null;
+                    const effectivePrice = hasPromoPrice
+                      ? promoInfo.effectivePrice
+                      : product.sellPrice;
+                    const strikePrice = hasPromoPrice
+                      ? product.sellPrice
+                      : product.originalPrice &&
+                          product.originalPrice > product.sellPrice
+                        ? product.originalPrice
+                        : undefined;
                     return (
                       <button
                         key={product.id}
                         type="button"
                         onClick={() => setSelectedProductId(product.id)}
-                        className={`flex flex-col justify-between overflow-hidden rounded-lg border-2 p-3 text-left transition-all cursor-pointer ${
+                        className={`flex flex-col justify-between min-w-0 overflow-hidden rounded-lg border-2 p-2.5 sm:p-3 text-left transition-all cursor-pointer ${
                           isSelected
                             ? 'border-orange-500 bg-orange-50 dark:bg-orange-500/10'
                             : 'border-slate-200 dark:border-white/[0.08] bg-slate-50/70 dark:bg-[#0E1117] hover:border-orange-500/50'
                         }`}
                       >
-                        <div>
-                          <p className="text-xs font-semibold text-slate-900 dark:text-white leading-snug">
+                        <div className="min-w-0">
+                          <p className="text-xs font-semibold text-slate-900 dark:text-white leading-snug break-words">
                             {product.name}
                           </p>
-                          {product.bonus ? (
-                            <p className="mt-0.5 text-[11px] font-medium text-orange-600 dark:text-orange-400">
+                          {hasPromoPrice ? (
+                            <p className="mt-0.5 text-[10px] font-mono-tabular font-semibold text-emerald-600 dark:text-emerald-400">
+                              Promosi · Baki {promoInfo.remainingQuota}/
+                              {promoInfo.maxQuota} org
+                            </p>
+                          ) : product.bonus ? (
+                            <p className="mt-0.5 text-[11px] font-medium text-orange-600 dark:text-orange-400 break-words">
                               {product.bonus}
                             </p>
                           ) : null}
-                          <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 line-clamp-2">
+                          <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 line-clamp-2 break-words">
                             {product.description}
                           </p>
                         </div>
 
-                        <div className="mt-2 pt-2 border-t border-slate-200/80 dark:border-white/[0.06] flex items-baseline gap-1.5">
+                        <div className="mt-2 pt-2 border-t border-slate-200/80 dark:border-white/[0.06] flex items-baseline gap-1.5 flex-wrap">
                           <span className="text-xs sm:text-sm font-bold font-mono-tabular text-orange-600 dark:text-orange-400">
-                            {formatMyr(product.sellPrice)}
+                            {formatMyr(effectivePrice)}
                           </span>
-                          {product.originalPrice &&
-                          product.originalPrice > product.sellPrice ? (
+                          {strikePrice ? (
                             <span className="text-[11px] font-mono-tabular text-slate-400 line-through">
-                              {formatMyr(product.originalPrice)}
+                              {formatMyr(strikePrice)}
                             </span>
                           ) : null}
                         </div>
@@ -577,22 +775,22 @@ export function BrandDetailView({
             </section>
 
             {/* Step 4: Manual Payment via WhatsApp / Bank / QR */}
-            <section className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-4 shadow-sm">
-              <div className="flex items-center justify-between gap-2 mb-3">
-                <div className="flex items-center gap-2">
+            <section className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-3.5 sm:p-4 shadow-sm min-w-0">
+              <div className="flex items-center justify-between gap-2 mb-3 min-w-0">
+                <div className="flex items-center gap-2 min-w-0">
                   <span className="flex h-6 w-6 items-center justify-center rounded-full bg-orange-600 text-[11px] font-bold text-white shrink-0">
                     4
                   </span>
-                  <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                  <h2 className="font-display text-sm sm:text-base font-bold text-slate-900 dark:text-white truncate">
                     Kaedah Bayaran Manual
                   </h2>
                 </div>
-                <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 shrink-0 whitespace-nowrap">
                   Caj Admin RM 0.00
                 </span>
               </div>
 
-              <div className="space-y-2">
+              <div className="space-y-2 min-w-0">
                 {activePayments.map((method) => {
                   const active = selectedPayment?.id === method.id;
                   return (
@@ -603,13 +801,13 @@ export function BrandDetailView({
                         setSelectedPaymentId(method.id);
                         setFormError(null);
                       }}
-                      className={`flex w-full items-center gap-3 rounded-lg border-2 p-3 text-left transition-all cursor-pointer ${
+                      className={`flex w-full min-w-0 overflow-hidden items-center gap-2.5 sm:gap-3 rounded-lg border-2 p-2.5 sm:p-3 text-left transition-all cursor-pointer ${
                         active
                           ? 'border-orange-500 bg-orange-50 dark:bg-orange-500/10'
                           : 'border-slate-200 dark:border-white/[0.08] bg-slate-50/70 dark:bg-[#0E1117] hover:border-orange-500/50'
                       }`}
                     >
-                      <div className="h-8 w-11 rounded-md bg-slate-900 dark:bg-white/10 text-white flex items-center justify-center shrink-0">
+                      <div className="h-8 w-10 sm:w-11 rounded-md bg-slate-900 dark:bg-white/10 text-white flex items-center justify-center shrink-0">
                         {method.type === 'whatsapp' ? (
                           <MessageCircle className="w-4 h-4 text-emerald-400" aria-hidden="true" />
                         ) : (
@@ -634,17 +832,17 @@ export function BrandDetailView({
 
               {selectedPayment &&
               (selectedPayment.qrImageUrl || requiresProof) ? (
-                <div className="mt-4 rounded-xl border border-sky-500/30 bg-sky-50/70 dark:bg-[#0E1117] p-4 space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-200 dark:border-white/[0.08]">
-                    <div>
-                      <p className="text-xs font-bold text-slate-900 dark:text-white">
+                <div className="mt-4 rounded-xl border border-sky-500/30 bg-sky-50/70 dark:bg-[#0E1117] p-3 sm:p-4 space-y-4 min-w-0">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-200 dark:border-white/[0.08] min-w-0">
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-slate-900 dark:text-white break-words">
                         Panduan Bayaran {selectedPayment.name}
                       </p>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 break-words">
                         {selectedPayment.instructions}
                       </p>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex items-center gap-2 shrink-0 flex-wrap">
                       <span className="font-mono-tabular text-xs font-bold text-orange-600 dark:text-orange-400">
                         {selectedPayment.accountNumber}
                       </span>
@@ -671,11 +869,11 @@ export function BrandDetailView({
 
                   {selectedPayment.qrImageUrl ? (
                     <div className="flex flex-col items-center gap-2.5">
-                      <div className="relative overflow-hidden rounded-xl border border-slate-200 dark:border-white/15 bg-black p-2 shadow-sm">
+                      <div className="relative overflow-hidden rounded-xl border border-slate-200 dark:border-white/15 bg-black p-2 shadow-sm max-w-full">
                         <img
                           src={selectedPayment.qrImageUrl}
                           alt={`QR Bayaran ${selectedPayment.name}`}
-                          className="h-56 w-56 sm:h-64 sm:w-64 object-contain rounded-lg"
+                          className="h-48 w-48 sm:h-60 sm:w-60 max-w-full object-contain rounded-lg"
                         />
                       </div>
                       <div className="flex flex-wrap items-center justify-center gap-2">
@@ -828,9 +1026,9 @@ export function BrandDetailView({
           </div>
 
           {/* Right Column: Sticky Rating, CS, Voucher, Order Summary */}
-          <div className="lg:col-span-1 lg:sticky lg:top-20 space-y-4">
+          <div className="lg:col-span-1 lg:sticky lg:top-20 space-y-4 min-w-0">
             {/* Review Rating */}
-            <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-4 shadow-sm">
+            <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-3.5 sm:p-4 shadow-sm min-w-0">
               <h3 className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1.5">
                 Ulasan &amp; Rating Pelanggan
               </h3>
@@ -838,7 +1036,7 @@ export function BrandDetailView({
                 <div className="font-display text-2xl font-bold font-mono-tabular text-slate-900 dark:text-white">
                   {brand.rating.toFixed(2)}
                 </div>
-                <div>
+                <div className="min-w-0">
                   <div className="flex gap-0.5 mb-0.5">
                     {[1, 2, 3, 4, 5].map((i) => (
                       <Star
@@ -856,16 +1054,16 @@ export function BrandDetailView({
             </div>
 
             {/* Contact CS */}
-            <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-4 shadow-sm">
-              <div className="flex items-start gap-2.5">
+            <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-3.5 sm:p-4 shadow-sm min-w-0">
+              <div className="flex items-start gap-2.5 min-w-0">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-500/10 text-orange-600 dark:text-orange-400 shrink-0">
                   <Headphones className="h-4 w-4" aria-hidden="true" />
                 </div>
-                <div className="flex-1">
+                <div className="flex-1 min-w-0">
                   <h3 className="text-xs font-semibold text-slate-900 dark:text-white">
                     Perlukan Bantuan?
                   </h3>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 mb-2">
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 mb-2 break-words">
                     Hubungi khidmat pelanggan kami di WhatsApp.
                   </p>
                   <a
@@ -874,7 +1072,7 @@ export function BrandDetailView({
                     rel="noopener noreferrer"
                     className="inline-flex w-full items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 hover:bg-slate-50 dark:hover:bg-white/[0.05] text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors"
                   >
-                    <MessageCircle className="w-3.5 h-3.5 text-emerald-500" aria-hidden="true" />
+                    <MessageCircle className="w-3.5 h-3.5 text-emerald-500 shrink-0" aria-hidden="true" />
                     <span>Hubungi CS WhatsApp</span>
                   </a>
                 </div>
@@ -882,12 +1080,12 @@ export function BrandDetailView({
             </div>
 
             {/* Voucher Code */}
-            <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-4 shadow-sm">
+            <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-3.5 sm:p-4 shadow-sm min-w-0">
               <h3 className="font-display text-sm font-bold text-slate-900 dark:text-white mb-2">
                 Kod Voucher
               </h3>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
+              <div className="flex gap-2 min-w-0">
+                <div className="relative flex-1 min-w-0">
                   <TicketPercent
                     className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2"
                     aria-hidden="true"
@@ -898,7 +1096,7 @@ export function BrandDetailView({
                     onChange={(e) => setVoucherInput(e.target.value)}
                     disabled={!!appliedVoucherCode}
                     placeholder="Contoh: TOPUPBALZ"
-                    className="w-full pl-8 pr-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-xs uppercase text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-orange-500 disabled:opacity-60"
+                    className="w-full min-w-0 pl-8 pr-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-xs uppercase text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-orange-500 disabled:opacity-60"
                   />
                 </div>
                 {!appliedVoucherCode ? (
@@ -955,11 +1153,19 @@ export function BrandDetailView({
                     {selectedProduct ? formatMyr(selectedProduct.sellPrice) : 'RM 0.00'}
                   </span>
                 </div>
-                {discountAmount > 0 ? (
+                {promoDiscountAmount > 0 ? (
                   <div className="flex justify-between gap-2 text-emerald-600 dark:text-emerald-400">
-                    <span>Diskaun ({appliedVoucherCode}):</span>
+                    <span>Harga Promosi:</span>
                     <span className="font-mono-tabular font-semibold">
-                      -{formatMyr(discountAmount)}
+                      -{formatMyr(promoDiscountAmount)}
+                    </span>
+                  </div>
+                ) : null}
+                {voucherDiscountAmount > 0 && appliedVoucherCode ? (
+                  <div className="flex justify-between gap-2 text-emerald-600 dark:text-emerald-400">
+                    <span>Voucher ({appliedVoucherCode}):</span>
+                    <span className="font-mono-tabular font-semibold">
+                      -{formatMyr(voucherDiscountAmount)}
                     </span>
                   </div>
                 ) : null}

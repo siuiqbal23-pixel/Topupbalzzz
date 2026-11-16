@@ -37,12 +37,21 @@ async function apiFetch<T>(
       headers,
     });
 
-    const data = await resp.json().catch(() => ({}));
+    const contentType = resp.headers.get('content-type') || '';
+    const isJson = contentType.includes('application/json');
+    const data = await resp.json().catch(() => null);
+
     if (resp.ok) {
-      return data as T;
+      if (!isJson && data === null) {
+        throw new Error('Respons pelayan bukan format JSON.');
+      }
+      return (data ?? {}) as T;
     }
 
-    lastError = new Error(data?.error || `Ralat pelayan (${resp.status})`);
+    lastError = new Error(
+      (data && typeof data.error === 'string' && data.error) ||
+        `Ralat pelayan (${resp.status})`
+    );
     if (resp.status === 503 && attempt < maxAttempts - 1) {
       const delayMs = 600 * Math.pow(2, attempt) + Math.floor(Math.random() * 250);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -88,13 +97,25 @@ export async function verifySignupOtp(
   });
 }
 
+export async function completeExistingSignup(payload: {
+  email: string;
+  password: string;
+  name: string;
+  otpVerificationToken: string;
+}): Promise<{ ok: boolean }> {
+  return apiFetch('/api/auth/complete-existing-signup', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function syncFirebaseUser(payload: {
   email?: string;
   name?: string;
   phone?: string;
   otpVerificationToken?: string;
 }): Promise<{ user: UserProfile }> {
-  return apiFetch(
+  const res = await apiFetch<{ user?: UserProfile }>(
     '/api/auth/sync',
     {
       method: 'POST',
@@ -102,17 +123,25 @@ export async function syncFirebaseUser(payload: {
     },
     true
   );
+  if (!res?.user) {
+    throw new Error('Profil pengguna tidak ditemui dalam respons pelayan.');
+  }
+  return { user: res.user };
 }
 
 export async function fetchMyProfile(): Promise<{ user: UserProfile }> {
-  return apiFetch('/api/me', {}, true);
+  const res = await apiFetch<{ user?: UserProfile }>('/api/me', {}, true);
+  if (!res?.user) {
+    throw new Error('Profil pengguna tidak ditemui dalam respons pelayan.');
+  }
+  return { user: res.user };
 }
 
 export async function updateMyProfile(patch: {
   name?: string;
   phone?: string;
 }): Promise<{ user: UserProfile }> {
-  return apiFetch(
+  const res = await apiFetch<{ user?: UserProfile }>(
     '/api/me',
     {
       method: 'PATCH',
@@ -120,6 +149,10 @@ export async function updateMyProfile(patch: {
     },
     true
   );
+  if (!res?.user) {
+    throw new Error('Gagal mengemas kini profil pengguna.');
+  }
+  return { user: res.user };
 }
 
 export async function fetchMyOrders(): Promise<{ orders: OrderItem[] }> {
@@ -257,5 +290,71 @@ export async function testAdminTelegramApi(payload?: {
     },
     true
   );
+}
+
+export interface EmailOtpConfigDto {
+  enabled: boolean;
+  gmailUser: string;
+  senderName: string;
+  hasAppPassword: boolean;
+  envConfigured: boolean;
+}
+
+export async function fetchAdminEmailOtpApi(): Promise<{
+  emailOtp: EmailOtpConfigDto;
+}> {
+  return apiFetch('/api/admin/email-otp', {}, true);
+}
+
+export async function saveAdminEmailOtpApi(payload: {
+  enabled: boolean;
+  gmailUser: string;
+  gmailAppPassword?: string;
+  senderName: string;
+}): Promise<{ emailOtp: EmailOtpConfigDto }> {
+  return apiFetch(
+    '/api/admin/email-otp',
+    {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    },
+    true
+  );
+}
+
+export async function testAdminEmailOtpApi(payload: {
+  gmailUser?: string;
+  gmailAppPassword?: string;
+  senderName?: string;
+  toEmail?: string;
+}): Promise<{ ok: boolean }> {
+  return apiFetch(
+    '/api/admin/email-otp/test',
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+    true
+  );
+}
+
+export interface AdminUserRecord {
+  uid: string;
+  email: string;
+  name: string;
+  phone: string;
+  role: 'admin' | 'customer';
+  emailVerified: boolean;
+  orderCount: number;
+  totalSpent: number;
+  createdAt: string;
+  lastLoginAt: string;
+  providers?: string[];
+}
+
+export async function fetchAdminUsersApi(): Promise<{
+  users: AdminUserRecord[];
+}> {
+  return apiFetch('/api/admin/users', {}, true);
 }
 

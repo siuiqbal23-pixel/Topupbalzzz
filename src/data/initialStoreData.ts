@@ -606,9 +606,8 @@ export const INITIAL_STORE_STATE: TopupBalzStoreState = {
     supportHours: 'Setiap Hari · 09:00 – 01:00 MYT',
     footerDescription:
       'Platform topup game pilihan di Malaysia dengan bayaran manual yang mudah, selamat, dan pengesahan pantas terus melalui WhatsApp.',
-    promoBannerEnabled: true,
-    promoBannerText:
-      'Gunakan kod voucher TOPUPBALZ (Diskaun RM 2.00) atau PROMO10 (Diskaun 10%) di halaman checkout!',
+    promoBannerEnabled: false,
+    promoBannerText: '',
     maintenanceActive: false,
     maintenanceTitle: 'Sistem Sedang Dalam Penyelenggaraan',
     maintenanceDescription:
@@ -626,7 +625,99 @@ export const INITIAL_STORE_STATE: TopupBalzStoreState = {
     telegramChannelUrl: '',
     telegramChannelName: 'Telegram Info Channel',
   },
+  gamePromo: {
+    active: true,
+    maxQuota: 15,
+    claimedCount: 0,
+    endAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    brandIds: ['brand-mlbb', 'brand-ff', 'brand-pubg'],
+    items: [
+      {
+        brandId: 'brand-mlbb',
+        productId: 'ml-wdp',
+        promoPrice: 6.9,
+        maxQuota: 10,
+        claimedCount: 0,
+      },
+      {
+        brandId: 'brand-ff',
+        productId: 'ff-100',
+        promoPrice: 3.5,
+        maxQuota: 15,
+        claimedCount: 0,
+      },
+      {
+        brandId: 'brand-pubg',
+        productId: 'pubg-60',
+        promoPrice: 3.5,
+        maxQuota: 20,
+        claimedCount: 0,
+      },
+    ],
+  },
 };
+
+export const DEFAULT_GAME_PROMO = INITIAL_STORE_STATE.gamePromo!;
+
+export function getEffectivePromoBrandIds(
+  promo: TopupBalzStoreState['gamePromo']
+): string[] {
+  if (!promo) return [];
+  if (Array.isArray(promo.items) && promo.items.length > 0) {
+    return Array.from(new Set(promo.items.map((item) => item.brandId)));
+  }
+  return Array.isArray(promo.brandIds) ? promo.brandIds : [];
+}
+
+export function getPromoItemQuota(
+  item: { maxQuota?: number; claimedCount?: number },
+  fallbackPromo?: Pick<
+    NonNullable<TopupBalzStoreState['gamePromo']>,
+    'maxQuota' | 'claimedCount'
+  >
+) {
+  const maxQuota = Math.max(
+    1,
+    Number(item.maxQuota ?? fallbackPromo?.maxQuota ?? 10)
+  );
+  const claimedCount = Math.max(
+    0,
+    Number(item.claimedCount ?? fallbackPromo?.claimedCount ?? 0)
+  );
+  const remainingQuota = Math.max(0, maxQuota - claimedCount);
+  return {
+    maxQuota,
+    claimedCount,
+    remainingQuota,
+    isFull: remainingQuota <= 0,
+  };
+}
+
+export function isGamePromoWithinTime(
+  promo: TopupBalzStoreState['gamePromo'],
+  nowMs = Date.now()
+): boolean {
+  if (!promo || !promo.active) return false;
+  if (getEffectivePromoBrandIds(promo).length === 0) {
+    return false;
+  }
+  const endMs = new Date(promo.endAt).getTime();
+  return Number.isFinite(endMs) && endMs > nowMs;
+}
+
+export function isGamePromoLive(
+  promo: TopupBalzStoreState['gamePromo'],
+  nowMs = Date.now()
+): boolean {
+  if (!isGamePromoWithinTime(promo, nowMs)) return false;
+  const items = Array.isArray(promo?.items) ? promo.items : [];
+  if (items.length > 0) {
+    return items.some((it) => !getPromoItemQuota(it, promo).isFull);
+  }
+  const maxQuota = Math.max(0, Number(promo?.maxQuota ?? 0));
+  const claimedCount = Math.max(0, Number(promo?.claimedCount ?? 0));
+  return maxQuota > 0 && claimedCount < maxQuota;
+}
 
 export function loadStoreState(): TopupBalzStoreState {
   try {
@@ -673,6 +764,10 @@ export function loadStoreState(): TopupBalzStoreState {
       settings: {
         ...INITIAL_STORE_STATE.settings,
         ...(parsed.settings ?? {}),
+      },
+      gamePromo: {
+        ...DEFAULT_GAME_PROMO,
+        ...(parsed.gamePromo ?? {}),
       },
     };
   } catch {

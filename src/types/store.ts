@@ -182,6 +182,27 @@ export interface StoreSettings {
   telegramChannelName?: string;
 }
 
+export interface GamePromoItem {
+  brandId: string;
+  productId: string;
+  promoPrice: number;
+  maxQuota?: number;
+  claimedCount?: number;
+}
+
+export interface GamePromoConfig {
+  active: boolean;
+  title?: string;
+  subtitle?: string;
+  badgeText?: string;
+  discountPercent?: number;
+  maxQuota: number;
+  claimedCount: number;
+  endAt: string;
+  brandIds: string[];
+  items?: GamePromoItem[];
+}
+
 export interface TopupBalzStoreState {
   categories: CategoryItem[];
   homeSections: HomeSection[];
@@ -195,4 +216,5 @@ export interface TopupBalzStoreState {
   user: UserProfile;
   whatsappTemplates: WhatsAppTemplates;
   settings: StoreSettings;
+  gamePromo?: GamePromoConfig;
 }

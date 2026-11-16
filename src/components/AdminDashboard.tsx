@@ -5,13 +5,17 @@ import {
   ArrowUp,
   Check,
   CheckCircle,
+  Clock,
+  Copy,
   ExternalLink,
   Eye,
   EyeOff,
+  Flame,
   Gamepad2,
   Info,
   LayoutDashboard,
   Lock,
+  Mail,
   Megaphone,
   Menu,
   MessageCircle,
@@ -23,17 +27,27 @@ import {
   ShoppingBag,
   Trash2,
   Upload,
+  Users,
   Download,
   X,
 } from 'lucide-react';
 import {
+  DEFAULT_GAME_PROMO,
   buildAdminWhatsAppUpdateUrl,
   formatMyr,
+  getPromoItemQuota,
+  resolvePaymentAccountDisplay,
 } from '../data/initialStoreData';
 import {
+  fetchAdminEmailOtpApi,
   fetchAdminTelegramApi,
+  fetchAdminUsersApi,
+  saveAdminEmailOtpApi,
   saveAdminTelegramApi,
+  testAdminEmailOtpApi,
   testAdminTelegramApi,
+  type AdminUserRecord,
+  type EmailOtpConfigDto,
   type TelegramConfigDto,
 } from '../lib/api';
 import type {
@@ -41,6 +55,7 @@ import type {
   BrandItem,
   CategoryItem,
   FaqItem,
+  GamePromoConfig,
   HomeSection,
   InfoPost,
   ManualPaymentAccount,
@@ -60,6 +75,7 @@ import { PaymentStatusBadge, TopupStatusBadge } from './StatusBadge';
 type AdminTab =
   | 'overview'
   | 'orders'
+  | 'users'
   | 'catalog'
   | 'info'
   | 'web'
@@ -68,6 +84,7 @@ type SettingsSubTab =
   | 'general'
   | 'transfer'
   | 'telegram'
+  | 'emailOtp'
   | 'whatsapp'
   | 'content'
   | 'maintenance'
@@ -91,6 +108,7 @@ interface AdminDashboardProps {
   onUpdatePaymentAccounts: (accounts: ManualPaymentAccount[]) => void;
   onUpdateWhatsappTemplates: (templates: WhatsAppTemplates) => void;
   onUpdateSettings: (settings: StoreSettings) => void;
+  onUpdateGamePromo?: (promo: GamePromoConfig) => void;
   onImportState: (next: TopupBalzStoreState) => void;
   onResetState: () => void;
   onBackToStore: () => void;
@@ -100,11 +118,19 @@ interface AdminDashboardProps {
 const TAB_TITLES: Record<AdminTab, string> = {
   overview: 'Dashboard Ringkasan',
   orders: 'Pengurusan Pesanan',
+  users: 'Senarai E-mel Pengguna',
   catalog: 'Katalog Game & Produk',
   info: 'Pengurusan Informasi',
-  web: 'Slider, Voucher & FAQ',
+  web: 'Promosi Game, Slider & FAQ',
   settings: 'Tetapan Sistem & WhatsApp',
 };
+
+function toLocalDatetimeInputValue(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
 
 export function AdminDashboard({
   store,
@@ -120,6 +146,7 @@ export function AdminDashboard({
   onUpdatePaymentAccounts,
   onUpdateWhatsappTemplates,
   onUpdateSettings,
+  onUpdateGamePromo,
   onImportState,
   onResetState,
   onBackToStore,
@@ -156,6 +183,7 @@ export function AdminDashboard({
     idLabel: 'User ID',
     serverLabel: 'Zone ID',
     image: '',
+    banner: '',
   });
   const [newPkgForm, setNewPkgForm] = useState({
     name: '',
@@ -192,6 +220,18 @@ export function AdminDashboard({
     content: '',
     image: '',
   });
+  const [newPromoItem, setNewPromoItem] = useState(() => {
+    const firstBrand = store.brands[0];
+    const firstProd = firstBrand?.products[0];
+    return {
+      brandId: firstBrand?.id ?? '',
+      productId: firstProd?.id ?? '',
+      promoPrice: firstProd
+        ? String(Math.max(1, Number((firstProd.sellPrice * 0.8).toFixed(2))))
+        : '',
+      maxQuota: '10',
+    };
+  });
 
   // Payment account form
   const [newPayForm, setNewPayForm] = useState({
@@ -218,6 +258,25 @@ export function AdminDashboard({
   const [tgTesting, setTgTesting] = useState(false);
   const [showBotToken, setShowBotToken] = useState(false);
   const [tgStatusMsg, setTgStatusMsg] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
+  // Email OTP (Gmail SMTP) config
+  const [emailOtpForm, setEmailOtpForm] = useState<EmailOtpConfigDto>({
+    enabled: false,
+    gmailUser: '',
+    senderName: 'TopupBalz',
+    hasAppPassword: false,
+    envConfigured: false,
+  });
+  const [gmailAppPasswordInput, setGmailAppPasswordInput] = useState('');
+  const [showGmailPass, setShowGmailPass] = useState(false);
+  const [emailOtpLoaded, setEmailOtpLoaded] = useState(false);
+  const [emailOtpSaving, setEmailOtpSaving] = useState(false);
+  const [emailOtpTesting, setEmailOtpTesting] = useState(false);
+  const [emailOtpTestTo, setEmailOtpTestTo] = useState('');
+  const [emailOtpStatusMsg, setEmailOtpStatusMsg] = useState<{
     type: 'success' | 'error';
     text: string;
   } | null>(null);
@@ -255,6 +314,75 @@ export function AdminDashboard({
       cancelled = true;
     };
   }, [activeTab, store.user.role, tgLoaded]);
+
+  useEffect(() => {
+    if (
+      activeTab !== 'settings' ||
+      store.user.role !== 'admin' ||
+      emailOtpLoaded
+    ) {
+      return;
+    }
+    let cancelled = false;
+    fetchAdminEmailOtpApi()
+      .then((res) => {
+        if (cancelled) return;
+        setEmailOtpForm(res.emailOtp);
+        if (!emailOtpTestTo && res.emailOtp.gmailUser) {
+          setEmailOtpTestTo(res.emailOtp.gmailUser);
+        }
+        setEmailOtpLoaded(true);
+      })
+      .catch(() => {
+        // ignore silent load error
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, store.user.role, emailOtpLoaded, emailOtpTestTo]);
+
+  // Registered & Logged-in User Emails
+  const [adminUsers, setAdminUsers] = useState<AdminUserRecord[]>([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [usersError, setUsersError] = useState('');
+  const [userSearch, setUserSearch] = useState('');
+
+  const loadAdminUsers = () => {
+    if (store.user.role !== 'admin') return;
+    setUsersLoading(true);
+    setUsersError('');
+    fetchAdminUsersApi()
+      .then((res) => {
+        setAdminUsers(res.users);
+      })
+      .catch((err) => {
+        setUsersError(
+          err instanceof Error
+            ? err.message
+            : 'Gagal memuatkan senarai pengguna.'
+        );
+      })
+      .finally(() => {
+        setUsersLoading(false);
+      });
+  };
+
+  useEffect(() => {
+    if (store.user.role !== 'admin') return;
+    loadAdminUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.user.role]);
+
+  const filteredUsers = useMemo(() => {
+    const q = userSearch.trim().toLowerCase();
+    if (!q) return adminUsers;
+    return adminUsers.filter(
+      (u) =>
+        u.email.toLowerCase().includes(q) ||
+        u.name.toLowerCase().includes(q) ||
+        u.phone.toLowerCase().includes(q)
+    );
+  }, [adminUsers, userSearch]);
 
   const [toast, setToast] = useState('');
   const [importError, setImportError] = useState('');
@@ -487,7 +615,7 @@ export function AdminDashboard({
       serverPlaceholder:
         newBrandForm.inputType === 'id+server' ? 'Contoh: 2001' : undefined,
       image: newBrandForm.image.trim(),
-      banner: newBrandForm.image.trim(),
+      banner: (newBrandForm.banner || newBrandForm.image).trim(),
       description: `Topup ${newBrandForm.name.trim()} pantas dengan bayaran manual WhatsApp.`,
       rating: 5.0,
       totalReviews: 100,
@@ -515,6 +643,7 @@ export function AdminDashboard({
       idLabel: 'User ID',
       serverLabel: 'Zone ID',
       image: '',
+      banner: '',
     });
     showToast(`${created.name} berjaya ditambah.`);
   };
@@ -596,6 +725,12 @@ export function AdminDashboard({
         stats.paymentReviewCount + stats.processingCount > 0
           ? stats.paymentReviewCount + stats.processingCount
           : undefined,
+    },
+    {
+      id: 'users',
+      label: 'E-mel Pengguna',
+      icon: Users,
+      badge: adminUsers.length > 0 ? adminUsers.length : undefined,
     },
     { id: 'catalog', label: 'Katalog Game', icon: Gamepad2 },
     { id: 'info', label: 'Informasi', icon: Info },
@@ -1460,6 +1595,52 @@ export function AdminDashboard({
                             />
                           </div>
                         ) : null}
+
+                        <div className="flex items-center gap-2 pt-1">
+                          <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] hover:bg-slate-100 dark:hover:bg-white/[0.06] text-xs font-medium cursor-pointer">
+                            <Upload className="w-3.5 h-3.5 text-orange-500" />
+                            <span>Pilih Fail Banner Belakang Logo</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="sr-only"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (!file) return;
+                                readImageFile(file, (dataUrl) => {
+                                  setNewBrandForm((prev) => ({
+                                    ...prev,
+                                    banner: dataUrl,
+                                  }));
+                                });
+                                e.target.value = '';
+                              }}
+                            />
+                          </label>
+                          {newBrandForm.banner ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setNewBrandForm((prev) => ({
+                                  ...prev,
+                                  banner: '',
+                                }))
+                              }
+                              className="text-[11px] text-rose-500 hover:underline cursor-pointer"
+                            >
+                              Buang
+                            </button>
+                          ) : null}
+                        </div>
+                        {newBrandForm.banner ? (
+                          <div className="h-16 w-28 rounded-lg overflow-hidden border border-slate-200 dark:border-white/10">
+                            <img
+                              src={newBrandForm.banner}
+                              alt="Pratonton Banner"
+                              className="h-full w-full object-cover"
+                            />
+                          </div>
+                        ) : null}
                       </div>
                       <button
                         type="submit"
@@ -1650,7 +1831,7 @@ export function AdminDashboard({
                         {/* Banner Image */}
                         <div className="space-y-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] p-3">
                           <p className="text-[11px] font-medium text-slate-600 dark:text-slate-300">
-                            Banner Halaman Game
+                            Banner Belakang Logo Game (Halaman Topup)
                           </p>
                           <div className="flex items-center gap-3">
                             <div className="h-14 w-24 rounded-lg overflow-hidden shrink-0 border border-slate-200 dark:border-white/10 bg-slate-100 dark:bg-slate-800">
@@ -1851,9 +2032,524 @@ export function AdminDashboard({
             </div>
           ) : null}
 
-          {/* TAB 4: WEB CONTENT (SLIDERS, VOUCHERS, FAQS) */}
+          {/* TAB 4: WEB CONTENT (GAME PROMO, SLIDERS, VOUCHERS, FAQS) */}
           {activeTab === 'web' ? (
             <div className="space-y-6">
+              {/* Promosi Game Bawah Banner */}
+              {(() => {
+                const currentPromo: GamePromoConfig = {
+                  ...DEFAULT_GAME_PROMO,
+                  ...(store.gamePromo ?? {}),
+                };
+                const promoItems = Array.isArray(currentPromo.items)
+                  ? currentPromo.items
+                  : [];
+                const endMs = new Date(currentPromo.endAt).getTime();
+                const isExpired =
+                  !Number.isFinite(endMs) || endMs <= Date.now();
+                const isFull =
+                  promoItems.length > 0
+                    ? promoItems.every(
+                        (it) => getPromoItemQuota(it, currentPromo).isFull
+                      )
+                    : currentPromo.claimedCount >= currentPromo.maxQuota;
+                const updatePromo = (patch: Partial<GamePromoConfig>) => {
+                  const nextItems =
+                    patch.items !== undefined ? patch.items : promoItems;
+                  const syncedBrandIds = Array.from(
+                    new Set(nextItems.map((it) => it.brandId))
+                  );
+                  onUpdateGamePromo?.({
+                    ...currentPromo,
+                    ...patch,
+                    items: nextItems,
+                    brandIds:
+                      patch.brandIds !== undefined
+                        ? patch.brandIds
+                        : syncedBrandIds,
+                  });
+                };
+
+                const pickerBrand =
+                  store.brands.find((b) => b.id === newPromoItem.brandId) ??
+                  store.brands[0];
+                const pickerProducts = pickerBrand?.products ?? [];
+                const pickerProduct =
+                  pickerProducts.find((p) => p.id === newPromoItem.productId) ??
+                  pickerProducts[0];
+
+                return (
+                  <div className="rounded-xl border border-orange-500/30 bg-white dark:bg-[#141923] p-5 sm:p-6 space-y-5">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Flame
+                            className="w-4 h-4 text-orange-500"
+                            aria-hidden="true"
+                          />
+                          <h2 className="font-display text-base font-bold text-slate-900 dark:text-white">
+                            Promosi Game (Bawah Banner)
+                          </h2>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
+                              !currentPromo.active
+                                ? 'bg-slate-500/15 text-slate-600 dark:text-slate-300'
+                                : isExpired
+                                  ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                                  : isFull
+                                    ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                                    : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                            }`}
+                          >
+                            {!currentPromo.active
+                              ? 'Dimatikan'
+                              : isExpired
+                                ? 'Tamat Masa'
+                                : isFull
+                                  ? 'Semua Kuota Habis'
+                                  : 'Sedang Berjalan'}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          Tetapkan masa tamat promosi dan had orang tercepat serta harga promo bagi setiap game.
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nextActive = !currentPromo.active;
+                          if (nextActive && isExpired) {
+                            updatePromo({
+                              active: true,
+                              endAt: new Date(
+                                Date.now() + 24 * 60 * 60 * 1000
+                              ).toISOString(),
+                            });
+                            showToast(
+                              'Promosi Game diaktifkan dan masa tamat ditetapkan +24 jam.'
+                            );
+                          } else {
+                            updatePromo({ active: nextActive });
+                            showToast(
+                              nextActive
+                                ? 'Promosi Game diaktifkan.'
+                                : 'Promosi Game dimatikan.'
+                            );
+                          }
+                        }}
+                        className={`px-4 py-2 rounded-lg text-xs font-semibold text-white cursor-pointer shrink-0 ${
+                          currentPromo.active
+                            ? 'bg-emerald-600 hover:bg-emerald-500'
+                            : 'bg-slate-600 hover:bg-slate-500'
+                        }`}
+                      >
+                        {currentPromo.active
+                          ? 'Status: Aktif (Klik Matikan)'
+                          : 'Status: Mati (Klik Aktifkan)'}
+                      </button>
+                    </div>
+
+                    {isExpired ? (
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 rounded-lg border border-rose-500/35 bg-rose-500/10 px-3.5 py-2.5 text-xs text-rose-600 dark:text-rose-300">
+                        <span>
+                          Masa tamat promosi telah lepas. Promosi tidak akan dipaparkan di Home selagi masa tamat tidak ditetapkan ke masa hadapan.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            updatePromo({
+                              active: true,
+                              endAt: new Date(
+                                Date.now() + 24 * 60 * 60 * 1000
+                              ).toISOString(),
+                            });
+                            showToast(
+                              'Masa tamat disambung +24 jam dan promosi kini aktif di Home.'
+                            );
+                          }}
+                          className="px-3 py-1.5 rounded-md bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-semibold cursor-pointer shrink-0"
+                        >
+                          Aktifkan +24 Jam
+                        </button>
+                      </div>
+                    ) : null}
+
+                    {/* Masa & Tarikh Tamat + Quick Masa Presets */}
+                    <div className="grid gap-3.5 sm:grid-cols-2 sm:items-end">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">
+                          Masa &amp; Tarikh Tamat
+                        </label>
+                        <input
+                          type="datetime-local"
+                          value={toLocalDatetimeInputValue(currentPromo.endAt)}
+                          onChange={(e) => {
+                            if (!e.target.value) return;
+                            const dt = new Date(e.target.value);
+                            if (!Number.isNaN(dt.getTime())) {
+                              updatePromo({ endAt: dt.toISOString() });
+                            }
+                          }}
+                          className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-xs font-mono-tabular"
+                        />
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                          <Clock className="w-3.5 h-3.5" aria-hidden="true" />
+                          <span>Set Masa Pantas:</span>
+                        </span>
+                        {[
+                          { label: '+1 Jam', hours: 1 },
+                          { label: '+6 Jam', hours: 6 },
+                          { label: '+24 Jam', hours: 24 },
+                          { label: '+3 Hari', hours: 72 },
+                          { label: '+7 Hari', hours: 168 },
+                        ].map((preset) => (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() => {
+                              updatePromo({
+                                endAt: new Date(
+                                  Date.now() + preset.hours * 60 * 60 * 1000
+                                ).toISOString(),
+                              });
+                              showToast(`Masa tamat ditetapkan ${preset.label}.`);
+                            }}
+                            className="px-2.5 py-1.5 rounded-md border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] hover:border-orange-500/60 text-[11px] font-semibold cursor-pointer"
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Senarai Game & Harga Promosi */}
+                    <div className="space-y-3 pt-3 border-t border-slate-200 dark:border-white/[0.08]">
+                      <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                        Senarai Game Promosi ({promoItems.length})
+                      </p>
+
+                      {promoItems.length === 0 ? (
+                        <p className="py-4 text-center text-xs text-slate-500 dark:text-slate-400">
+                          Belum ada item promosi. Pilih game, pakej, harga promosi, dan had orang di bawah.
+                        </p>
+                      ) : (
+                        <div className="space-y-2.5">
+                          {promoItems.map((it) => {
+                            const b = store.brands.find(
+                              (x) => x.id === it.brandId
+                            );
+                            const p = b?.products.find(
+                              (x) => x.id === it.productId
+                            );
+                            if (!b || !p) return null;
+                            const quota = getPromoItemQuota(it, currentPromo);
+                            return (
+                              <div
+                                key={`${it.brandId}-${it.productId}`}
+                                className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] p-3"
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className="h-10 w-10 rounded overflow-hidden shrink-0 border border-slate-200 dark:border-white/10">
+                                    <GameImage
+                                      src={b.image}
+                                      alt={b.name}
+                                      title={b.name}
+                                    />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                                      {b.name} · {p.name}
+                                    </p>
+                                    <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-tabular">
+                                      Asal: {formatMyr(p.sellPrice)} · Baki {quota.remainingQuota}/{quota.maxQuota} org
+                                    </p>
+                                  </div>
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                                      Promo (RM):
+                                    </span>
+                                    <input
+                                      type="number"
+                                      step="0.1"
+                                      min={0.1}
+                                      value={it.promoPrice}
+                                      onChange={(e) => {
+                                        const val = Math.max(
+                                          0.1,
+                                          parseFloat(e.target.value) || 0.1
+                                        );
+                                        updatePromo({
+                                          items: promoItems.map((row) =>
+                                            row.brandId === it.brandId &&
+                                            row.productId === it.productId
+                                              ? { ...row, promoPrice: val }
+                                              : row
+                                          ),
+                                        });
+                                      }}
+                                      className="w-20 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] text-xs font-mono-tabular font-semibold text-orange-600 dark:text-orange-400"
+                                    />
+                                  </div>
+
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                                      Had Org:
+                                    </span>
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      value={quota.maxQuota}
+                                      onChange={(e) => {
+                                        const maxQuota = Math.max(
+                                          1,
+                                          parseInt(e.target.value, 10) || 1
+                                        );
+                                        updatePromo({
+                                          items: promoItems.map((row) =>
+                                            row.brandId === it.brandId &&
+                                            row.productId === it.productId
+                                              ? { ...row, maxQuota }
+                                              : row
+                                          ),
+                                        });
+                                      }}
+                                      className="w-16 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] text-xs font-mono-tabular"
+                                    />
+                                  </div>
+
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                                      Dibeli:
+                                    </span>
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      value={quota.claimedCount}
+                                      onChange={(e) => {
+                                        const claimedCount = Math.max(
+                                          0,
+                                          parseInt(e.target.value, 10) || 0
+                                        );
+                                        updatePromo({
+                                          items: promoItems.map((row) =>
+                                            row.brandId === it.brandId &&
+                                            row.productId === it.productId
+                                              ? { ...row, claimedCount }
+                                              : row
+                                          ),
+                                        });
+                                      }}
+                                      className="w-16 px-2 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] text-xs font-mono-tabular"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        updatePromo({
+                                          items: promoItems.map((row) =>
+                                            row.brandId === it.brandId &&
+                                            row.productId === it.productId
+                                              ? { ...row, claimedCount: 0 }
+                                              : row
+                                          ),
+                                        });
+                                        showToast(`Kiraan ${b.name} diset semula ke 0.`);
+                                      }}
+                                      className="px-2 py-1.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] hover:bg-slate-100 dark:hover:bg-white/[0.06] text-[11px] font-semibold cursor-pointer"
+                                    >
+                                      Reset
+                                    </button>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    aria-label="Buang item promosi"
+                                    onClick={() => {
+                                      updatePromo({
+                                        items: promoItems.filter(
+                                          (row) =>
+                                            !(
+                                              row.brandId === it.brandId &&
+                                              row.productId === it.productId
+                                            )
+                                        ),
+                                      });
+                                      showToast('Item promosi dibuang.');
+                                    }}
+                                    className="p-1.5 text-rose-500 hover:bg-rose-500/10 rounded cursor-pointer"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Tambah Game & Harga Promosi Baharu */}
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          if (!pickerBrand || !pickerProduct) return;
+                          const priceVal = parseFloat(newPromoItem.promoPrice);
+                          const quotaVal = Math.max(
+                            1,
+                            parseInt(newPromoItem.maxQuota, 10) || 10
+                          );
+                          if (isNaN(priceVal) || priceVal <= 0) return;
+                          const existsIdx = promoItems.findIndex(
+                            (row) =>
+                              row.brandId === pickerBrand.id &&
+                              row.productId === pickerProduct.id
+                          );
+                          const nextItems =
+                            existsIdx >= 0
+                              ? promoItems.map((row, idx) =>
+                                  idx === existsIdx
+                                    ? {
+                                        ...row,
+                                        promoPrice: priceVal,
+                                        maxQuota: quotaVal,
+                                      }
+                                    : row
+                                )
+                              : [
+                                  ...promoItems,
+                                  {
+                                    brandId: pickerBrand.id,
+                                    productId: pickerProduct.id,
+                                    promoPrice: priceVal,
+                                    maxQuota: quotaVal,
+                                    claimedCount: 0,
+                                  },
+                                ];
+                          const nextEndAt = isExpired
+                            ? new Date(
+                                Date.now() + 24 * 60 * 60 * 1000
+                              ).toISOString()
+                            : currentPromo.endAt;
+                          updatePromo({
+                            active: true,
+                            endAt: nextEndAt,
+                            items: nextItems,
+                          });
+                          showToast(
+                            isExpired
+                              ? `${pickerBrand.name} (${pickerProduct.name}) ditetapkan RM ${priceVal.toFixed(2)} untuk ${quotaVal} orang (masa tamat disambung +24 jam).`
+                              : `${pickerBrand.name} (${pickerProduct.name}) ditetapkan RM ${priceVal.toFixed(2)} untuk ${quotaVal} orang.`
+                          );
+                        }}
+                        className="grid sm:grid-cols-5 gap-2 pt-2"
+                      >
+                        <select
+                          value={pickerBrand?.id ?? ''}
+                          onChange={(e) => {
+                            const b = store.brands.find(
+                              (x) => x.id === e.target.value
+                            );
+                            const p = b?.products[0];
+                            setNewPromoItem({
+                              ...newPromoItem,
+                              brandId: e.target.value,
+                              productId: p?.id ?? '',
+                              promoPrice: p
+                                ? String(
+                                    Math.max(
+                                      0.5,
+                                      Number((p.sellPrice * 0.8).toFixed(2))
+                                    )
+                                  )
+                                : '',
+                            });
+                          }}
+                          className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-xs"
+                        >
+                          {store.brands.map((b) => (
+                            <option key={`sel-b-${b.id}`} value={b.id}>
+                              {b.name}
+                            </option>
+                          ))}
+                        </select>
+
+                        <select
+                          value={pickerProduct?.id ?? ''}
+                          onChange={(e) => {
+                            const p = pickerProducts.find(
+                              (x) => x.id === e.target.value
+                            );
+                            setNewPromoItem({
+                              ...newPromoItem,
+                              brandId: pickerBrand?.id ?? '',
+                              productId: e.target.value,
+                              promoPrice: p
+                                ? String(
+                                    Math.max(
+                                      0.5,
+                                      Number((p.sellPrice * 0.8).toFixed(2))
+                                    )
+                                  )
+                                : '',
+                            });
+                          }}
+                          className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-xs"
+                        >
+                          {pickerProducts.map((p) => (
+                            <option key={`sel-p-${p.id}`} value={p.id}>
+                              {p.name} ({formatMyr(p.sellPrice)})
+                            </option>
+                          ))}
+                        </select>
+
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0.1"
+                          required
+                          value={newPromoItem.promoPrice}
+                          onChange={(e) =>
+                            setNewPromoItem({
+                              ...newPromoItem,
+                              promoPrice: e.target.value,
+                            })
+                          }
+                          placeholder="Harga Promo (RM)"
+                          className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-xs font-mono-tabular"
+                        />
+
+                        <input
+                          type="number"
+                          min="1"
+                          required
+                          value={newPromoItem.maxQuota}
+                          onChange={(e) =>
+                            setNewPromoItem({
+                              ...newPromoItem,
+                              maxQuota: e.target.value,
+                            })
+                          }
+                          placeholder="Had Orang (cth: 10)"
+                          className="px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-xs font-mono-tabular"
+                        />
+
+                        <button
+                          type="submit"
+                          className="px-4 py-2 rounded-lg bg-orange-600 hover:bg-orange-500 text-xs font-semibold text-white cursor-pointer"
+                        >
+                          + Tambah Promosi
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Vouchers */}
               <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-5 sm:p-6 space-y-4">
                 <h2 className="font-display text-base font-bold text-slate-900 dark:text-white">
@@ -2499,6 +3195,7 @@ export function AdminDashboard({
                     { id: 'general', label: 'Maklumat Umum' },
                     { id: 'transfer', label: 'Bayaran Manual' },
                     { id: 'telegram', label: 'Telegram Info Channel' },
+                    { id: 'emailOtp', label: 'E-mel OTP (Gmail)' },
                     { id: 'whatsapp', label: 'Templat WhatsApp' },
                     { id: 'content', label: 'Halaman Kandungan' },
                     { id: 'maintenance', label: 'Penyelenggaraan' },
@@ -2631,22 +3328,6 @@ export function AdminDashboard({
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">
-                      Teks Banner Promosi
-                    </label>
-                    <input
-                      type="text"
-                      value={store.settings.promoBannerText}
-                      onChange={(e) =>
-                        onUpdateSettings({
-                          ...store.settings,
-                          promoBannerText: e.target.value,
-                        })
-                      }
-                      className="w-full px-3.5 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">
                       Deskripsi Footer
                     </label>
                     <textarea
@@ -2686,7 +3367,11 @@ export function AdminDashboard({
                     </button>
                   </div>
                   <div className="space-y-3">
-                    {store.paymentAccounts.map((acc) => {
+                    {store.paymentAccounts.map((rawAcc) => {
+                      const acc = resolvePaymentAccountDisplay(
+                        rawAcc,
+                        store.settings
+                      );
                       const effectiveFlow =
                         acc.notifyChannel ??
                         (acc.channelCode.toUpperCase() === 'TNG'
@@ -2695,104 +3380,212 @@ export function AdminDashboard({
                       return (
                         <div
                           key={acc.id}
-                          className="p-4 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] grid sm:grid-cols-5 gap-3 items-center"
+                          className="p-4 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] space-y-3"
                         >
-                          <input
-                            type="text"
-                            value={acc.name}
-                            onChange={(e) =>
-                              onUpdatePaymentAccounts(
-                                store.paymentAccounts.map((p) =>
-                                  p.id === acc.id
-                                    ? { ...p, name: e.target.value }
-                                    : p
-                                )
-                              )
-                            }
-                            className="px-3 py-1.5 rounded border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] text-xs font-semibold"
-                          />
-                          <input
-                            type="text"
-                            value={acc.accountNumber}
-                            onChange={(e) =>
-                              onUpdatePaymentAccounts(
-                                store.paymentAccounts.map((p) =>
-                                  p.id === acc.id
-                                    ? { ...p, accountNumber: e.target.value }
-                                    : p
-                                )
-                              )
-                            }
-                            className="px-3 py-1.5 rounded border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] text-xs font-mono-tabular"
-                          />
-                          <input
-                            type="text"
-                            value={acc.accountLabel}
-                            onChange={(e) =>
-                              onUpdatePaymentAccounts(
-                                store.paymentAccounts.map((p) =>
-                                  p.id === acc.id
-                                    ? { ...p, accountLabel: e.target.value }
-                                    : p
-                                )
-                              )
-                            }
-                            className="px-3 py-1.5 rounded border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] text-xs"
-                          />
-                          <select
-                            aria-label={`Aliran notifikasi ${acc.name}`}
-                            value={effectiveFlow}
-                            onChange={(e) =>
-                              onUpdatePaymentAccounts(
-                                store.paymentAccounts.map((p) =>
-                                  p.id === acc.id
-                                    ? {
-                                        ...p,
-                                        notifyChannel: e.target.value as
-                                          | 'whatsapp'
-                                          | 'telegram',
-                                      }
-                                    : p
-                                )
-                              )
-                            }
-                            className="px-2.5 py-1.5 rounded border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] text-xs font-semibold"
-                          >
-                            <option value="whatsapp">Hantar WhatsApp</option>
-                            <option value="telegram">Telegram Info Channel</option>
-                          </select>
-                          <div className="flex items-center justify-end gap-2">
+                          <div className="grid sm:grid-cols-5 gap-3 items-end">
+                            <div>
+                              <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">
+                                Nama Saluran
+                              </label>
+                              <input
+                                type="text"
+                                value={acc.name}
+                                onChange={(e) =>
+                                  onUpdatePaymentAccounts(
+                                    store.paymentAccounts.map((p) =>
+                                      p.id === acc.id
+                                        ? { ...p, name: e.target.value }
+                                        : p
+                                    )
+                                  )
+                                }
+                                className="w-full px-3 py-1.5 rounded border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] text-xs font-semibold"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">
+                                No. Akaun / Tel
+                              </label>
+                              <input
+                                type="text"
+                                value={acc.accountNumber}
+                                onChange={(e) =>
+                                  onUpdatePaymentAccounts(
+                                    store.paymentAccounts.map((p) =>
+                                      p.id === acc.id
+                                        ? { ...p, accountNumber: e.target.value }
+                                        : p
+                                    )
+                                  )
+                                }
+                                className="w-full px-3 py-1.5 rounded border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] text-xs font-mono-tabular"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">
+                                Atas Nama
+                              </label>
+                              <input
+                                type="text"
+                                value={acc.accountLabel}
+                                onChange={(e) =>
+                                  onUpdatePaymentAccounts(
+                                    store.paymentAccounts.map((p) =>
+                                      p.id === acc.id
+                                        ? { ...p, accountLabel: e.target.value }
+                                        : p
+                                    )
+                                  )
+                                }
+                                className="w-full px-3 py-1.5 rounded border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] text-xs"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">
+                                Aliran Butang
+                              </label>
+                              <select
+                                aria-label={`Aliran notifikasi ${acc.name}`}
+                                value={effectiveFlow}
+                                onChange={(e) =>
+                                  onUpdatePaymentAccounts(
+                                    store.paymentAccounts.map((p) =>
+                                      p.id === acc.id
+                                        ? {
+                                            ...p,
+                                            notifyChannel: e.target.value as
+                                              | 'whatsapp'
+                                              | 'telegram',
+                                          }
+                                        : p
+                                    )
+                                  )
+                                }
+                                className="w-full px-2.5 py-1.5 rounded border border-slate-200 dark:border-white/10 bg-white dark:bg-[#141923] text-xs font-semibold"
+                              >
+                                <option value="whatsapp">Hantar WhatsApp</option>
+                                <option value="telegram">
+                                  Telegram Info Channel
+                                </option>
+                              </select>
+                            </div>
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdatePaymentAccounts(
+                                    store.paymentAccounts.map((p) =>
+                                      p.id === acc.id
+                                        ? { ...p, active: !p.active }
+                                        : p
+                                    )
+                                  )
+                                }
+                                className={`px-2.5 py-1.5 rounded text-xs font-semibold cursor-pointer ${
+                                  acc.active
+                                    ? 'bg-emerald-600 text-white'
+                                    : 'bg-slate-600 text-white'
+                                }`}
+                              >
+                                {acc.active ? 'Aktif' : 'Mati'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdatePaymentAccounts(
+                                    store.paymentAccounts.filter(
+                                      (p) => p.id !== acc.id
+                                    )
+                                  )
+                                }
+                                className="p-1.5 text-rose-500 cursor-pointer"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center justify-between gap-3 pt-2.5 border-t border-slate-200/80 dark:border-white/[0.06]">
+                            <div className="flex flex-wrap items-center gap-2.5">
+                              {acc.qrImageUrl ? (
+                                <img
+                                  src={acc.qrImageUrl}
+                                  alt={`QR ${acc.name}`}
+                                  className="h-12 w-12 rounded-lg border border-slate-200 dark:border-white/15 object-contain bg-black"
+                                />
+                              ) : null}
+                              <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-white/15 bg-white dark:bg-[#141923] text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer hover:border-orange-500">
+                                <Upload className="w-3.5 h-3.5" />
+                                <span>
+                                  {acc.qrImageUrl
+                                    ? 'Tukar Gambar QR'
+                                    : 'Muat Naik Gambar QR'}
+                                </span>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    if (!file) return;
+                                    readImageFile(file, (dataUrl) => {
+                                      onUpdatePaymentAccounts(
+                                        store.paymentAccounts.map((p) =>
+                                          p.id === acc.id
+                                            ? { ...p, qrImageUrl: dataUrl }
+                                            : p
+                                        )
+                                      );
+                                      showToast(
+                                        `Gambar QR untuk ${acc.name} dikemas kini.`
+                                      );
+                                    });
+                                    e.target.value = '';
+                                  }}
+                                />
+                              </label>
+                              {acc.qrImageUrl ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    onUpdatePaymentAccounts(
+                                      store.paymentAccounts.map((p) =>
+                                        p.id === acc.id
+                                          ? { ...p, qrImageUrl: '' }
+                                          : p
+                                      )
+                                    )
+                                  }
+                                  className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-rose-500 hover:bg-rose-500/10 cursor-pointer"
+                                >
+                                  Buang QR
+                                </button>
+                              ) : null}
+                            </div>
+
                             <button
                               type="button"
                               onClick={() =>
                                 onUpdatePaymentAccounts(
                                   store.paymentAccounts.map((p) =>
                                     p.id === acc.id
-                                      ? { ...p, active: !p.active }
+                                      ? {
+                                          ...p,
+                                          requireProof: !acc.requireProof,
+                                        }
                                       : p
                                   )
                                 )
                               }
-                              className={`px-2.5 py-1.5 rounded text-xs font-semibold cursor-pointer ${
-                                acc.active
-                                  ? 'bg-emerald-600 text-white'
-                                  : 'bg-slate-600 text-white'
+                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border cursor-pointer ${
+                                acc.requireProof
+                                  ? 'border-sky-500/40 bg-sky-500/10 text-sky-600 dark:text-sky-300'
+                                  : 'border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300'
                               }`}
                             >
-                              {acc.active ? 'Aktif' : 'Mati'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                onUpdatePaymentAccounts(
-                                  store.paymentAccounts.filter(
-                                    (p) => p.id !== acc.id
-                                  )
-                                )
-                              }
-                              className="p-1.5 text-rose-500 cursor-pointer"
-                            >
-                              <Trash2 className="w-4 h-4" />
+                              {acc.requireProof
+                                ? 'Bukti Bayaran: Wajib Pilih Fail'
+                                : 'Bukti Bayaran: Pilihan'}
                             </button>
                           </div>
                         </div>
@@ -3131,6 +3924,247 @@ export function AdminDashboard({
                 </div>
               ) : null}
 
+              {/* Sub-tab: Email OTP (Gmail SMTP) */}
+              {settingsSubTab === 'emailOtp' ? (
+                <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-6 space-y-5">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div>
+                      <h2 className="font-display text-base font-bold flex items-center gap-2">
+                        <Mail className="w-4 h-4 text-orange-500" />
+                        <span>Penghantaran Kod OTP ke Gmail (SMTP)</span>
+                      </h2>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                        Sambungkan akaun Gmail anda dengan Google App Password supaya kod OTP pendaftaran dihantar terus ke peti masuk Gmail pelanggan secara nyata.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEmailOtpForm((prev) => ({
+                          ...prev,
+                          enabled: !prev.enabled,
+                        }))
+                      }
+                      className={`px-4 py-2 rounded-lg text-xs font-semibold cursor-pointer whitespace-nowrap ${
+                        emailOtpForm.enabled
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-200 dark:bg-white/10 text-slate-800 dark:text-white'
+                      }`}
+                    >
+                      {emailOtpForm.enabled
+                        ? 'Gmail SMTP: Aktif'
+                        : 'Gmail SMTP: Mati'}
+                    </button>
+                  </div>
+
+                  {emailOtpStatusMsg ? (
+                    <div
+                      className={`p-3 rounded-lg border text-xs font-medium ${
+                        emailOtpStatusMsg.type === 'success'
+                          ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                          : 'border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300'
+                      }`}
+                    >
+                      {emailOtpStatusMsg.text}
+                    </div>
+                  ) : null}
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">
+                        Nama Pengirim
+                      </label>
+                      <input
+                        type="text"
+                        value={emailOtpForm.senderName}
+                        onChange={(e) =>
+                          setEmailOtpForm({
+                            ...emailOtpForm,
+                            senderName: e.target.value,
+                          })
+                        }
+                        placeholder="TopupBalz"
+                        className="w-full px-3.5 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">
+                        Alamat Gmail Pengirim
+                      </label>
+                      <input
+                        type="email"
+                        value={emailOtpForm.gmailUser}
+                        onChange={(e) =>
+                          setEmailOtpForm({
+                            ...emailOtpForm,
+                            gmailUser: e.target.value,
+                          })
+                        }
+                        placeholder="contoh@gmail.com"
+                        className="w-full px-3.5 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-sm font-mono-tabular"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">
+                        Google App Password (16 Aksara){' '}
+                        {emailOtpForm.hasAppPassword ? (
+                          <span className="text-emerald-600 dark:text-emerald-400">
+                            · Sudah disimpan
+                          </span>
+                        ) : null}
+                      </label>
+                      <div className="relative">
+                        <input
+                          type={showGmailPass ? 'text' : 'password'}
+                          value={gmailAppPasswordInput}
+                          onChange={(e) =>
+                            setGmailAppPasswordInput(e.target.value)
+                          }
+                          placeholder={
+                            emailOtpForm.hasAppPassword
+                              ? 'Biarkan kosong untuk kekalkan kata laluan sedia ada'
+                              : 'xxxx xxxx xxxx xxxx'
+                          }
+                          className="w-full pr-10 pl-3.5 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-sm font-mono-tabular"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowGmailPass((v) => !v)}
+                          aria-label={
+                            showGmailPass
+                              ? 'Sembunyikan App Password'
+                              : 'Tunjukkan App Password'
+                          }
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                        >
+                          {showGmailPass ? (
+                            <EyeOff className="w-4 h-4" />
+                          ) : (
+                            <Eye className="w-4 h-4" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">
+                        E-mel Penerima Ujian
+                      </label>
+                      <input
+                        type="email"
+                        value={emailOtpTestTo}
+                        onChange={(e) => setEmailOtpTestTo(e.target.value)}
+                        placeholder={
+                          emailOtpForm.gmailUser || 'siuiqbal23@gmail.com'
+                        }
+                        className="w-full px-3.5 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-sm font-mono-tabular"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3 pt-1">
+                    <button
+                      type="button"
+                      disabled={emailOtpSaving}
+                      onClick={async () => {
+                        setEmailOtpSaving(true);
+                        setEmailOtpStatusMsg(null);
+                        try {
+                          const res = await saveAdminEmailOtpApi({
+                            enabled: emailOtpForm.enabled,
+                            gmailUser: emailOtpForm.gmailUser,
+                            gmailAppPassword:
+                              gmailAppPasswordInput.trim() || undefined,
+                            senderName: emailOtpForm.senderName,
+                          });
+                          setEmailOtpForm(res.emailOtp);
+                          setGmailAppPasswordInput('');
+                          setEmailOtpStatusMsg({
+                            type: 'success',
+                            text: 'Tetapan Gmail SMTP berjaya disimpan.',
+                          });
+                          showToast('Tetapan Gmail OTP disimpan.');
+                        } catch (err) {
+                          setEmailOtpStatusMsg({
+                            type: 'error',
+                            text:
+                              err instanceof Error
+                                ? err.message
+                                : 'Gagal menyimpan tetapan Gmail OTP.',
+                          });
+                        } finally {
+                          setEmailOtpSaving(false);
+                        }
+                      }}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-orange-600 hover:bg-orange-500 disabled:opacity-60 text-xs font-semibold text-white cursor-pointer"
+                    >
+                      <Check className="w-4 h-4" />
+                      <span>
+                        {emailOtpSaving
+                          ? 'Menyimpan...'
+                          : 'Simpan Tetapan Gmail'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={emailOtpTesting}
+                      onClick={async () => {
+                        setEmailOtpTesting(true);
+                        setEmailOtpStatusMsg(null);
+                        try {
+                          await testAdminEmailOtpApi({
+                            gmailUser: emailOtpForm.gmailUser,
+                            gmailAppPassword:
+                              gmailAppPasswordInput.trim() || undefined,
+                            senderName: emailOtpForm.senderName,
+                            toEmail:
+                              emailOtpTestTo.trim() || emailOtpForm.gmailUser,
+                          });
+                          setEmailOtpStatusMsg({
+                            type: 'success',
+                            text: 'E-mel ujian berjaya dihantar ke peti masuk Gmail! Semak Inbox / Spam.',
+                          });
+                          showToast('E-mel ujian berjaya dihantar!');
+                        } catch (err) {
+                          setEmailOtpStatusMsg({
+                            type: 'error',
+                            text:
+                              err instanceof Error
+                                ? err.message
+                                : 'Gagal menghantar e-mel ujian melalui Gmail SMTP.',
+                          });
+                        } finally {
+                          setEmailOtpTesting(false);
+                        }
+                      }}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-orange-500/40 bg-orange-500/10 hover:bg-orange-500/20 disabled:opacity-60 text-xs font-semibold text-orange-600 dark:text-orange-300 cursor-pointer"
+                    >
+                      <Mail className="w-4 h-4" />
+                      <span>
+                        {emailOtpTesting
+                          ? 'Menghantar ujian...'
+                          : 'Uji Hantar E-mel ke Gmail'}
+                      </span>
+                    </button>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-[#0E1117] p-4 space-y-1.5 text-xs text-slate-600 dark:text-slate-300">
+                    <p className="font-semibold text-slate-900 dark:text-white">
+                      Cara Dapatkan Google App Password (Untuk Hantar OTP Sebenar ke Gmail):
+                    </p>
+                    <p>
+                      1. Pastikan <strong>2-Step Verification</strong> diaktifkan pada akaun Google anda.
+                    </p>
+                    <p>
+                      2. Buka <strong>myaccount.google.com/apppasswords</strong>, cipta App Password baharu (pilih nama <em>TopupBalz</em>), dan salin kod 16 aksara ke ruangan di atas.
+                    </p>
+                    <p>
+                      3. Aktifkan suis <strong>Gmail SMTP: Aktif</strong> di atas, klik <strong>Simpan Tetapan Gmail</strong>, kemudian tekan <strong>Uji Hantar E-mel ke Gmail</strong>.
+                    </p>
+                  </div>
+                </div>
+              ) : null}
+
               {/* Sub-tab: WhatsApp Templates */}
               {settingsSubTab === 'whatsapp' ? (
                 <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-6 space-y-4">
@@ -3321,6 +4355,167 @@ export function AdminDashboard({
                   ) : null}
                 </div>
               ) : null}
+            </div>
+          ) : null}
+
+          {/* TAB: REGISTERED & LOGGED-IN USER EMAILS */}
+          {activeTab === 'users' ? (
+            <div className="space-y-4">
+              {/* Summary stats */}
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-4">
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Jumlah E-mel Berdaftar / Log Masuk
+                  </p>
+                  <p className="font-display text-2xl font-bold font-mono-tabular mt-1">
+                    {adminUsers.length}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-4">
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    E-mel Disahkan (OTP / Google)
+                  </p>
+                  <p className="font-display text-2xl font-bold font-mono-tabular text-emerald-600 dark:text-emerald-400 mt-1">
+                    {adminUsers.filter((u) => u.emailVerified).length}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-4">
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Pengguna Pernah Membeli
+                  </p>
+                  <p className="font-display text-2xl font-bold font-mono-tabular text-orange-600 dark:text-orange-400 mt-1">
+                    {adminUsers.filter((u) => u.orderCount > 0).length}
+                  </p>
+                </div>
+              </div>
+
+              {/* Search & Refresh */}
+              <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-4 sm:p-5 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h2 className="font-display text-base font-bold">
+                      Semua E-mel Log Masuk &amp; Akaun Pengguna
+                    </h2>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Setiap akaun yang pernah daftar atau log masuk melalui Google / E-mel dipaparkan di sini.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1 sm:w-64">
+                      <Search
+                        className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"
+                        aria-hidden="true"
+                      />
+                      <input
+                        type="search"
+                        value={userSearch}
+                        onChange={(e) => setUserSearch(e.target.value)}
+                        placeholder="Cari e-mel, nama, no. tel..."
+                        className="w-full pl-8 pr-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] text-xs focus:outline-none focus:border-orange-500"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={loadAdminUsers}
+                      disabled={usersLoading}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#0E1117] hover:bg-slate-100 dark:hover:bg-white/[0.06] text-xs font-semibold cursor-pointer disabled:opacity-50 shrink-0"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+                      <span>Muat Semula</span>
+                    </button>
+                  </div>
+                </div>
+
+                {usersError ? (
+                  <p className="rounded-lg bg-rose-500/10 border border-rose-500/20 px-3 py-2 text-xs text-rose-500">
+                    {usersError}
+                  </p>
+                ) : null}
+
+                {usersLoading && adminUsers.length === 0 ? (
+                  <p className="py-10 text-center text-xs text-slate-500 dark:text-slate-400">
+                    Memuatkan senarai e-mel pengguna...
+                  </p>
+                ) : filteredUsers.length === 0 ? (
+                  <p className="py-10 text-center text-xs text-slate-500 dark:text-slate-400">
+                    Tiada e-mel pengguna ditemui.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-slate-200 dark:divide-white/[0.06]">
+                    {filteredUsers.map((u) => (
+                      <div
+                        key={u.uid}
+                        className="py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                      >
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono-tabular text-xs sm:text-sm font-bold text-slate-900 dark:text-white break-all">
+                              {u.email}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard?.writeText(u.email);
+                                showToast(`E-mel ${u.email} disalin.`);
+                              }}
+                              title="Salin e-mel"
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 dark:bg-white/[0.06] hover:bg-slate-200 dark:hover:bg-white/10 text-[10px] font-medium text-slate-600 dark:text-slate-300 cursor-pointer"
+                            >
+                              <Copy className="w-3 h-3" aria-hidden="true" />
+                              <span>Salin</span>
+                            </button>
+                            {u.role === 'admin' ? (
+                              <span className="px-2 py-0.5 rounded bg-orange-500/15 text-orange-600 dark:text-orange-400 text-[10px] font-semibold">
+                                Admin
+                              </span>
+                            ) : null}
+                            {u.emailVerified ? (
+                              <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-semibold">
+                                Disahkan
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[10px] font-semibold">
+                                Belum Disahkan
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-slate-600 dark:text-slate-300">
+                            {u.name}
+                            {u.phone ? ` · ${u.phone}` : ''}
+                            {u.providers && u.providers.length > 0
+                              ? ` · Kaedah: ${u.providers
+                                  .map((p) =>
+                                    p === 'google.com'
+                                      ? 'Google'
+                                      : p === 'password'
+                                        ? 'E-mel & Kata Laluan'
+                                        : p
+                                  )
+                                  .join(', ')}`
+                              : ''}
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap sm:flex-col sm:items-end gap-x-4 gap-y-1 text-[11px] shrink-0">
+                          <span className="font-mono-tabular font-semibold text-slate-800 dark:text-slate-200">
+                            {u.orderCount} pesanan · {formatMyr(u.totalSpent)}
+                          </span>
+                          <span className="text-slate-500 dark:text-slate-400">
+                            Log masuk terakhir:{' '}
+                            {new Date(u.lastLoginAt).toLocaleString('ms-MY', {
+                              day: '2-digit',
+                              month: 'short',
+                              year: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           ) : null}
         </main>

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
@@ -8,12 +8,14 @@ import {
 } from 'firebase/auth';
 import { ArrowLeft, CheckCircle2, KeyRound, Mail } from 'lucide-react';
 import {
+  completeExistingSignup,
   sendSignupOtp,
   syncFirebaseUser,
   verifySignupOtp,
 } from '../lib/api';
 import { auth, googleAuthProvider } from '../lib/firebase';
 import type { UserProfile } from '../types/store';
+import { BrandWordmark } from './BrandWordmark';
 
 interface AuthViewProps {
   mode: 'login' | 'register' | 'forgot';
@@ -32,7 +34,7 @@ function mapFirebaseAuthError(err: unknown): string {
     return 'Kaedah Emel & Kata Laluan belum diaktifkan di Firebase Console (Authentication -> Sign-in method -> Email/Password). Sila aktifkan atau gunakan Log Masuk Google.';
   }
   if (code === 'auth/invalid-credential' || code === 'auth/wrong-password') {
-    return 'E-mel atau kata laluan tidak tepat.';
+    return 'E-mel atau kata laluan tidak tepat. Jika akaun anda sebelum ini log masuk melalui Google, sila gunakan butang Google di atas atau tekan "Lupa kata laluan?".';
   }
   if (code === 'auth/user-not-found') {
     return 'Akaun tidak ditemui. Sila daftar akaun baharu terlebih dahulu.';
@@ -70,7 +72,14 @@ export function AuthView({
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
   const [resetSent, setResetSent] = useState(false);
+
+  useEffect(() => {
+    setError('');
+    setSuccessMessage('');
+    setResetSent(false);
+  }, [mode]);
 
   const handleGoogleLogin = async () => {
     setError('');
@@ -92,6 +101,7 @@ export function AuthView({
 
   const handleSendOtp = async () => {
     setError('');
+    setSuccessMessage('');
     setOtpPreviewCode(null);
     const cleanEmail = email.trim().toLowerCase();
     if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
@@ -105,6 +115,8 @@ export function AuthView({
       setOtpVerifiedToken(null);
       if (res.delivery === 'preview' && res.previewOtp) {
         setOtpPreviewCode(res.previewOtp);
+      } else {
+        setSuccessMessage(`Kod OTP 6 digit telah dihantar ke ${cleanEmail}.`);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal menghantar kod OTP.');
@@ -115,6 +127,7 @@ export function AuthView({
 
   const handleVerifyOtp = async () => {
     setError('');
+    setSuccessMessage('');
     const cleanEmail = email.trim().toLowerCase();
     if (!/^\d{6}$/.test(otpCode.trim())) {
       setError('Sila masukkan kod OTP 6 digit.');
@@ -141,15 +154,18 @@ export function AuthView({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setSuccessMessage('');
+
+    const cleanEmail = email.trim().toLowerCase();
 
     if (mode === 'forgot') {
-      if (!email.trim()) {
+      if (!cleanEmail) {
         setError('Sila masukkan alamat e-mel anda.');
         return;
       }
       setLoading(true);
       try {
-        await sendPasswordResetEmail(auth, email.trim());
+        await sendPasswordResetEmail(auth, cleanEmail);
         setResetSent(true);
       } catch (err) {
         setError(mapFirebaseAuthError(err));
@@ -168,27 +184,53 @@ export function AuthView({
         setError('Sila masukkan nama penuh anda.');
         return;
       }
-      if (!email.trim() || password.length < 6) {
+      if (!cleanEmail || password.length < 6) {
         setError('Sila lengkapkan e-mel dan kata laluan (min 6 aksara).');
         return;
       }
 
       setLoading(true);
       try {
-        const cred = await createUserWithEmailAndPassword(
-          auth,
-          email.trim(),
-          password
-        );
-        await updateProfile(cred.user, { displayName: name.trim() });
+        try {
+          const cred = await createUserWithEmailAndPassword(
+            auth,
+            cleanEmail,
+            password
+          );
+          await updateProfile(cred.user, { displayName: name.trim() });
+        } catch (createErr) {
+          const errCode =
+            typeof createErr === 'object' && createErr && 'code' in createErr
+              ? String((createErr as { code?: string }).code)
+              : '';
+          if (errCode !== 'auth/email-already-in-use') {
+            throw createErr;
+          }
+          // Account already existed (e.g. via Google Sign-In) without this password;
+          // user just verified inbox ownership via Email OTP, so link password & sign in seamlessly.
+          await completeExistingSignup({
+            email: cleanEmail,
+            password,
+            name: name.trim(),
+            otpVerificationToken: otpVerifiedToken,
+          });
+          await signInWithEmailAndPassword(auth, cleanEmail, password);
+        }
+
         const { user } = await syncFirebaseUser({
-          email: email.trim(),
+          email: cleanEmail,
           name: name.trim(),
           phone: phone.trim(),
           otpVerificationToken: otpVerifiedToken,
         });
+        setError('');
+        setSuccessMessage(
+          'Pendaftaran akaun berjaya! Akaun anda telah didaftarkan dan dilog masuk.'
+        );
         onSuccessAuth(user);
-        onNavigate(returnPath || '/');
+        setTimeout(() => {
+          onNavigate(returnPath || '/');
+        }, 1200);
       } catch (err) {
         setError(mapFirebaseAuthError(err));
       } finally {
@@ -198,7 +240,7 @@ export function AuthView({
     }
 
     // Login mode
-    if (!email.trim() || !password) {
+    if (!cleanEmail || !password) {
       setError('Sila lengkapkan e-mel dan kata laluan.');
       return;
     }
@@ -207,15 +249,19 @@ export function AuthView({
     try {
       const cred = await signInWithEmailAndPassword(
         auth,
-        email.trim(),
+        cleanEmail,
         password
       );
       const { user } = await syncFirebaseUser({
-        email: cred.user.email || email.trim(),
+        email: cred.user.email || cleanEmail,
         name: cred.user.displayName || '',
       });
+      setError('');
+      setSuccessMessage('Log masuk berjaya!');
       onSuccessAuth(user);
-      onNavigate(returnPath || '/');
+      setTimeout(() => {
+        onNavigate(returnPath || '/');
+      }, 600);
     } catch (err) {
       setError(mapFirebaseAuthError(err));
     } finally {
@@ -226,10 +272,10 @@ export function AuthView({
   return (
     <div className="flex-1 flex items-center justify-center px-3 py-6">
       <div className="w-full max-w-sm rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#141923] p-5 shadow-sm space-y-4">
-        <div className="space-y-1 text-center">
-          <p className="text-[11px] font-semibold text-orange-600 dark:text-orange-400">
-            {appName}
-          </p>
+        <div className="space-y-1.5 text-center">
+          <div className="flex justify-center">
+            <BrandWordmark appName={appName} compact />
+          </div>
           <h1 className="font-display text-lg font-bold text-slate-900 dark:text-white">
             {mode === 'login'
               ? 'Log Masuk Akaun'
@@ -359,7 +405,7 @@ export function AuthView({
               </div>
               {otpPreviewCode ? (
                 <p className="text-[11px] text-amber-700 dark:text-amber-300 leading-snug">
-                  Kod OTP pratonton (perkhidmatan e-mel belum dikonfigurasi):{' '}
+                  Kod OTP anda:{' '}
                   <span className="font-mono-tabular font-bold select-all">
                     {otpPreviewCode}
                   </span>
@@ -461,6 +507,13 @@ export function AuthView({
             </div>
           ) : null}
 
+          {successMessage ? (
+            <p className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-[11px] font-medium text-emerald-700 dark:text-emerald-300 leading-snug flex items-center gap-1.5">
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>{successMessage}</span>
+            </p>
+          ) : null}
+
           {error ? (
             <p className="rounded-lg bg-rose-500/10 border border-rose-500/20 px-3 py-2 text-[11px] text-rose-600 dark:text-rose-400 leading-snug">
               {error}
@@ -468,7 +521,7 @@ export function AuthView({
           ) : null}
 
           {resetSent ? (
-            <p className="text-xs text-emerald-600 dark:text-emerald-400">
+            <p className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">
               Pautan tetapan semula kata laluan telah dihantar ke {email}.
             </p>
           ) : null}

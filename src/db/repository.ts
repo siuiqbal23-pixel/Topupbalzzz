@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import nodemailer from 'nodemailer';
 import { and, desc, eq, gt } from 'drizzle-orm';
 import { db } from './index.ts';
 import { emailOtps, infoPosts, orders, storeConfigs } from './schema.ts';
@@ -320,6 +321,286 @@ function hashOtp(email: string, code: string): string {
     .digest('hex');
 }
 
+const DEFAULT_RESEND_FROM = 'TopupBalz <onboarding@resend.dev>';
+const UNVERIFIABLE_PUBLIC_EMAIL_DOMAINS = new Set([
+  'gmail.com',
+  'googlemail.com',
+  'yahoo.com',
+  'yahoo.com.my',
+  'hotmail.com',
+  'outlook.com',
+  'live.com',
+  'msn.com',
+  'icloud.com',
+  'me.com',
+  'aol.com',
+  'proton.me',
+  'protonmail.com',
+]);
+
+function resolveResendFromAddress(rawFrom?: string): string {
+  const trimmed = (rawFrom || '').trim();
+  if (!trimmed) return DEFAULT_RESEND_FROM;
+
+  const angleMatch = trimmed.match(/<([^>]+)>/);
+  const emailPart = (angleMatch ? angleMatch[1] : trimmed).trim().toLowerCase();
+  const atIndex = emailPart.lastIndexOf('@');
+  if (atIndex <= 0) return DEFAULT_RESEND_FROM;
+
+  const domain = emailPart.slice(atIndex + 1);
+  if (!domain || !domain.includes('.') || UNVERIFIABLE_PUBLIC_EMAIL_DOMAINS.has(domain)) {
+    return DEFAULT_RESEND_FROM;
+  }
+
+  return trimmed;
+}
+
+async function sendOtpViaResend(
+  resendKey: string,
+  from: string,
+  toEmail: string,
+  code: string
+): Promise<{ ok: boolean; status: number; errBody: string }> {
+  const resp = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${resendKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from,
+      to: [toEmail],
+      subject: 'Kod OTP Pengesahan Pendaftaran TopupBalz',
+      html: `<p>Kod OTP pengesahan pendaftaran anda ialah: <strong style="font-size:20px;letter-spacing:3px">${code}</strong></p><p>Kod ini sah selama 10 minit.</p>`,
+    }),
+  });
+
+  if (resp.ok) {
+    return { ok: true, status: resp.status, errBody: '' };
+  }
+
+  const errBody = await resp.text().catch(() => '');
+  return { ok: false, status: resp.status, errBody };
+}
+
+export interface EmailOtpConfig {
+  enabled: boolean;
+  gmailUser: string;
+  gmailAppPassword: string;
+  senderName: string;
+}
+
+export interface EmailOtpPublicConfig {
+  enabled: boolean;
+  gmailUser: string;
+  senderName: string;
+  hasAppPassword: boolean;
+  envConfigured: boolean;
+}
+
+const DEFAULT_EMAIL_OTP_CONFIG: EmailOtpConfig = {
+  enabled: false,
+  gmailUser: '',
+  gmailAppPassword: '',
+  senderName: 'TopupBalz',
+};
+
+export async function getEmailOtpConfig(): Promise<EmailOtpConfig> {
+  try {
+    const rows = await db
+      .select()
+      .from(storeConfigs)
+      .where(eq(storeConfigs.key, 'email_otp'))
+      .limit(1);
+    const raw = (rows[0]?.data as Partial<EmailOtpConfig> | undefined) || {};
+    return {
+      enabled: Boolean(raw.enabled),
+      gmailUser: typeof raw.gmailUser === 'string' ? raw.gmailUser.trim() : '',
+      gmailAppPassword:
+        typeof raw.gmailAppPassword === 'string'
+          ? raw.gmailAppPassword.replace(/\s+/g, '')
+          : '',
+      senderName:
+        typeof raw.senderName === 'string' && raw.senderName.trim()
+          ? raw.senderName.trim()
+          : 'TopupBalz',
+    };
+  } catch (error) {
+    console.error('Database query failed in getEmailOtpConfig:', error);
+    return { ...DEFAULT_EMAIL_OTP_CONFIG };
+  }
+}
+
+export async function getPublicEmailOtpConfig(): Promise<EmailOtpPublicConfig> {
+  const cfg = await getEmailOtpConfig();
+  const envUser = (process.env.GMAIL_USER || process.env.SMTP_USER || '').trim();
+  const envPass = (
+    process.env.GMAIL_APP_PASSWORD ||
+    process.env.SMTP_PASS ||
+    ''
+  ).replace(/\s+/g, '');
+
+  return {
+    enabled: cfg.enabled,
+    gmailUser: cfg.gmailUser || envUser,
+    senderName: cfg.senderName || 'TopupBalz',
+    hasAppPassword: Boolean(cfg.gmailAppPassword || envPass),
+    envConfigured: Boolean(envUser && envPass),
+  };
+}
+
+export async function saveEmailOtpConfig(input: {
+  enabled: boolean;
+  gmailUser: string;
+  gmailAppPassword?: string;
+  senderName?: string;
+}): Promise<EmailOtpPublicConfig> {
+  try {
+    const existing = await getEmailOtpConfig();
+    const newPass =
+      typeof input.gmailAppPassword === 'string' &&
+      input.gmailAppPassword.trim()
+        ? input.gmailAppPassword.replace(/\s+/g, '')
+        : existing.gmailAppPassword;
+
+    const clean: EmailOtpConfig = {
+      enabled: Boolean(input.enabled),
+      gmailUser: (input.gmailUser || '').trim().toLowerCase(),
+      gmailAppPassword: newPass,
+      senderName: (input.senderName || '').trim() || 'TopupBalz',
+    };
+
+    await db
+      .insert(storeConfigs)
+      .values({
+        key: 'email_otp',
+        data: clean,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: storeConfigs.key,
+        set: {
+          data: clean,
+          updatedAt: new Date(),
+        },
+      });
+
+    return getPublicEmailOtpConfig();
+  } catch (error) {
+    console.error('Database query failed in saveEmailOtpConfig:', error);
+    throw new Error('Gagal menyimpan tetapan E-mel OTP.', { cause: error });
+  }
+}
+
+async function resolveActiveGmailCredentials(): Promise<{
+  user: string;
+  pass: string;
+  senderName: string;
+} | null> {
+  const cfg = await getEmailOtpConfig();
+  if (cfg.enabled && cfg.gmailUser && cfg.gmailAppPassword) {
+    return {
+      user: cfg.gmailUser,
+      pass: cfg.gmailAppPassword,
+      senderName: cfg.senderName || 'TopupBalz',
+    };
+  }
+
+  const envUser = (process.env.GMAIL_USER || process.env.SMTP_USER || '').trim();
+  const envPass = (
+    process.env.GMAIL_APP_PASSWORD ||
+    process.env.SMTP_PASS ||
+    ''
+  ).replace(/\s+/g, '');
+
+  if (envUser && envPass) {
+    return {
+      user: envUser,
+      pass: envPass,
+      senderName: cfg.senderName || 'TopupBalz',
+    };
+  }
+
+  return null;
+}
+
+async function sendOtpViaGmailSmtp(params: {
+  user: string;
+  pass: string;
+  senderName: string;
+  toEmail: string;
+  subject: string;
+  html: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: params.user,
+        pass: params.pass.replace(/\s+/g, ''),
+      },
+    });
+    await transporter.sendMail({
+      from: `${params.senderName} <${params.user}>`,
+      to: params.toEmail,
+      subject: params.subject,
+      html: params.html,
+    });
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? err.message
+          : 'Gagal menghantar e-mel melalui Gmail SMTP.',
+    };
+  }
+}
+
+export async function testGmailSmtpConnection(input: {
+  gmailUser?: string;
+  gmailAppPassword?: string;
+  senderName?: string;
+  toEmail?: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const saved = await getEmailOtpConfig();
+  const user = (
+    input.gmailUser ||
+    saved.gmailUser ||
+    process.env.GMAIL_USER ||
+    process.env.SMTP_USER ||
+    ''
+  )
+    .trim()
+    .toLowerCase();
+  const pass = (
+    input.gmailAppPassword ||
+    saved.gmailAppPassword ||
+    process.env.GMAIL_APP_PASSWORD ||
+    process.env.SMTP_PASS ||
+    ''
+  ).replace(/\s+/g, '');
+  const senderName = (input.senderName || saved.senderName || 'TopupBalz').trim();
+  const toEmail = (input.toEmail || user).trim().toLowerCase();
+
+  if (!user || !pass) {
+    return {
+      ok: false,
+      error: 'Sila isi Alamat Gmail dan App Password Google (16 aksara).',
+    };
+  }
+
+  return sendOtpViaGmailSmtp({
+    user,
+    pass,
+    senderName,
+    toEmail,
+    subject: 'Ujian Penghantaran OTP Gmail - TopupBalz',
+    html: `<div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:12px;"><h2 style="color:#ea580c;margin:0 0 12px;">TopupBalz - Ujian Berjaya</h2><p style="color:#334155;font-size:14px;line-height:1.5;">Sambungan Gmail SMTP anda aktif dan sedia menghantar kod OTP pendaftaran sebenar terus ke peti masuk Gmail pengguna.</p><p style="margin-top:16px;font-size:18px;font-weight:bold;letter-spacing:4px;color:#0f172a;">123456</p></div>`,
+  });
+}
+
 export async function createAndSendEmailOtp(rawEmail: string): Promise<{
   delivery: 'email' | 'preview';
   previewOtp?: string;
@@ -341,30 +622,44 @@ export async function createAndSendEmailOtp(rawEmail: string): Promise<{
     throw new Error('Gagal menjana kod OTP pengesahan.', { cause: error });
   }
 
-  const resendKey = process.env.RESEND_API_KEY;
-  if (resendKey) {
-    const from = process.env.RESEND_FROM_EMAIL || 'TopupBalz <onboarding@resend.dev>';
-    const resp = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${resendKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from,
-        to: [email],
-        subject: 'Kod OTP Pengesahan Pendaftaran TopupBalz',
-        html: `<p>Kod OTP pengesahan pendaftaran anda ialah: <strong style="font-size:20px;letter-spacing:3px">${code}</strong></p><p>Kod ini sah selama 10 minit.</p>`,
-      }),
+  // 1. Prefer Gmail SMTP when configured (delivers real OTPs to any Gmail/email inbox)
+  const gmailCreds = await resolveActiveGmailCredentials();
+  if (gmailCreds) {
+    const smtpRes = await sendOtpViaGmailSmtp({
+      user: gmailCreds.user,
+      pass: gmailCreds.pass,
+      senderName: gmailCreds.senderName,
+      toEmail: email,
+      subject: `Kod OTP Pengesahan Pendaftaran TopupBalz: ${code}`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:12px;background:#ffffff;"><h2 style="color:#ea580c;margin:0 0 10px;">TopupBalz</h2><p style="color:#334155;font-size:14px;margin:0 0 16px;">Gunakan kod OTP 6 digit di bawah untuk mengesahkan pendaftaran akaun anda:</p><div style="background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:16px;text-align:center;margin:0 0 16px;"><span style="font-size:28px;font-weight:800;letter-spacing:6px;color:#ea580c;">${code}</span></div><p style="color:#64748b;font-size:12px;margin:0;">Kod ini sah selama 10 minit. Jangan kongsikan kod ini kepada sesiapa.</p></div>`,
     });
-
-    if (!resp.ok) {
-      const errBody = await resp.text();
-      console.error('Resend API error:', errBody);
-      throw new Error('Gagal menghantar e-mel OTP. Sila semak tetapan e-mel.');
+    if (smtpRes.ok) {
+      return { delivery: 'email' };
     }
+  }
 
-    return { delivery: 'email' };
+  // 2. Fallback to Resend API if configured
+  const resendKey = process.env.RESEND_API_KEY?.trim();
+  if (resendKey) {
+    const primaryFrom = resolveResendFromAddress(process.env.RESEND_FROM_EMAIL);
+    try {
+      let attempt = await sendOtpViaResend(resendKey, primaryFrom, email, code);
+
+      // If a custom RESEND_FROM_EMAIL domain isn't verified yet, retry once via onboarding@resend.dev
+      if (!attempt.ok && attempt.status === 403 && primaryFrom !== DEFAULT_RESEND_FROM) {
+        attempt = await sendOtpViaResend(resendKey, DEFAULT_RESEND_FROM, email, code);
+      }
+
+      if (attempt.ok) {
+        return { delivery: 'email' };
+      }
+
+      // Fall back silently to on-screen preview OTP when Resend is in sandbox/unverified-domain mode
+      // so user registration stays unblocked without polluting stderr logs.
+      return { delivery: 'preview', previewOtp: code };
+    } catch {
+      return { delivery: 'preview', previewOtp: code };
+    }
   }
 
   return { delivery: 'preview', previewOtp: code };

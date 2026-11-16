@@ -1,6 +1,7 @@
 import { Mail, MessageCircle, Phone } from 'lucide-react';
 import { normalizePhoneForWa } from '../data/initialStoreData';
 import type { StoreSettings } from '../types/store';
+import { BrandWordmark } from './BrandWordmark';
 
 interface MainFooterProps {
   settings: StoreSettings;
@@ -24,9 +25,9 @@ export function MainFooter({ settings, onNavigate }: MainFooterProps) {
         <div className="grid gap-6 md:grid-cols-4">
           {/* Company Info */}
           <div className="md:col-span-2 space-y-2">
-            <h3 className="font-display text-base font-bold text-slate-900 dark:text-white">
-              {settings.title}
-            </h3>
+            <div>
+              <BrandWordmark appName={settings.title} />
+            </div>
             <p className="text-xs text-slate-600 dark:text-slate-400 max-w-md leading-relaxed">
               {settings.footerDescription}
             </p>

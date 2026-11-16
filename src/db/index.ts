@@ -8,7 +8,13 @@ declare global {
 
 export const createPool = () => {
   if (!global._postgresPool) {
-    const connectionString = process.env.POSTGRES_URL || process.env.SQL_URL;
+    // Prefer the Supabase integration variable linked to the current project.
+    // The older unprefixed POSTGRES_URL may still point to the retired project.
+    const connectionString =
+      process.env.TOPUPBALZ_MY_POSTGRES_URL ||
+      process.env.POSTGRES_URL ||
+      process.env.SQL_URL;
+
     if (connectionString) {
       // Keep TLS configuration in the Pool options. SSL query parameters in
       // the URL override the explicit ssl object in node-postgres.

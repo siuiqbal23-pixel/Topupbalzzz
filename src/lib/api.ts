@@ -58,7 +58,11 @@ export async function fetchBootstrap(): Promise<{
   config: Partial<TopupBalzStoreState> | null;
   infoPosts: InfoPost[];
 }> {
-  return apiFetch('/api/bootstrap');
+  const d: any = await apiFetch('/api/bootstrap');
+  if (!d || !Array.isArray(d.infoPosts)) {
+    throw new Error('API tidak tersedia');
+  }
+  return d;
 }
 
 export async function fetchPublicTransactions(): Promise<{

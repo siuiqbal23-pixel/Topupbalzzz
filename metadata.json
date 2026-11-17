@@ -1,8 +1,0 @@
-{
-  "name": "TopupBalz",
-  "description": "Platform topup game pantas dan murah di Malaysia — Free Fire, Mobile Legends, PUBG Mobile, FC Mobile, beserta panel admin pengurusan pesanan.",
-  "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
-}
